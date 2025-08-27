@@ -38,7 +38,7 @@ def random_id(length: int) -> str:
 
 
 def get_logger(name: str) -> logging.Logger:
-    return logging.getLogger("hfrigrental.{}".format(name))
+    return logging.getLogger("app.{name}")
 
 
 def intval(val: str) -> int:
@@ -212,7 +212,7 @@ def dict_merge(d, u) -> dict:
     return d
 
 
-def create_jwt_token(data, secret, expiry):
+def create_jwt_token(data, secret, expiry, iss="app"):
     """Generate a JWT token with expiration"""
     now = datetime.datetime.now(tz=datetime.timezone.utc)
     jti = str(uuid.uuid4())
@@ -220,7 +220,7 @@ def create_jwt_token(data, secret, expiry):
     payload = {
         **data,
         "jti": jti,
-        "iss": "hfrigrental",
+        "iss": iss,
         "iat": now,
         "nbf": now,
         "exp": exp,
