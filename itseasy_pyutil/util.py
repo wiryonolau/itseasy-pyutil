@@ -25,6 +25,12 @@ ph = PasswordHasher(
 )
 
 
+class UserToken(NamedTuple):
+    jti: str
+    exp: datetime.datetime
+    token: str
+
+
 class LoggerAware:
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -38,7 +44,7 @@ def random_id(length: int) -> str:
 
 
 def get_logger(name: str) -> logging.Logger:
-    return logging.getLogger("app.{name}")
+    return logging.getLogger(f"app.{name}")
 
 
 def intval(val: str) -> int:
