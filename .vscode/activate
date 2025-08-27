@@ -1,0 +1,2 @@
+source ~/.profile
+source .env/bin/activate
