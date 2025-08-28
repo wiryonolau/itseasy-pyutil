@@ -336,7 +336,9 @@ class Database:
         return (stmt, join_params + conditions_params + [limit, offset])
 
     def insert_stmt(self, table, column_values={}):
-        columns = ",".join(column_values.keys())
+        columns = ",".join(
+            [self.sanitize_identifier(c) for c in column_values.keys()]
+        )
         values = list(column_values.values())
 
         # Insert query
@@ -352,8 +354,13 @@ class Database:
             for key, value in column_values.items()
             if key not in identifiers
         }
-        set_clause = ", ".join([f"{col}=%s" for col in update_columns])
-        where_clause = " AND ".join([f"{id_col}=%s" for id_col in identifiers])
+
+        set_clause = ", ".join(
+            [f"{self.sanitize_identifier(col)}=%s" for col in update_columns]
+        )
+        where_clause = " AND ".join(
+            [f"{self.sanitize_identifier(id_col)}=%s" for id_col in identifiers]
+        )
 
         update_stmt = f"UPDATE {self.sanitize_identifier(table)} SET {set_clause} WHERE {where_clause}"
         # Update values: exclude identifier columns from set
