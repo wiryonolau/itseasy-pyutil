@@ -34,7 +34,7 @@ ORDER_PATTERN = re.compile(
     r"""
     ^
     [A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*   # identifier (schema.table.column)
-    (?:\s+AS\s+[A-Za-z_][A-Za-z0-9_]*)?                   # optional "AS alias"
+    (?:\s+IS\s+NULL)?                                     # optional "IS NULL"
     (?:\s+(ASC|DESC))?                                    # optional ASC/DESC
     $
     """,
