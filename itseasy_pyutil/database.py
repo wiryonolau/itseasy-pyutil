@@ -77,7 +77,12 @@ class Join(NamedTuple):
 
 
 class Response(NamedTuple):
+    """
+    Response for sql other then SELECT
+    """
+
     success: bool
+    lastrowid: Optional[int]
     error: Optional[str]
 
 
@@ -551,9 +556,13 @@ class Database:
 
                     if return_result:
                         return await cursor.fetchall()
-                    return Response(success=True, error=None)
+                    return Response(
+                        success=True,
+                        lastrowid=cursor.lastrowid or None,
+                        error=None,
+                    )
         except Exception as e:
-            return Response(success=False, error=str(e))
+            return Response(success=False, lastrowid=None, error=str(e))
 
     async def execute_many(self, statements=[]):
         affected_rows = 0
@@ -576,11 +585,15 @@ class Database:
                         await cursor.execute(query, args)
                         affected_rows += cursor.rowcount
                     await conn.commit()
-                    return Response(success=affected_rows > 0, error=None)
+                    return Response(
+                        success=affected_rows > 0,
+                        lastrowid=cursor.lastrowid or None,
+                        error=None,
+                    )
                 except Exception as e:
                     await conn.rollback()
                     self._logger.info(sys.exc_info())
-                    return Response(success=False, error=str(e))
+                    return Response(success=False, lastrowid=None, error=str(e))
 
     async def delete(self, table, conditions=[]):
         conditions, params = self.parse_conditions(conditions)
@@ -600,11 +613,15 @@ class Database:
                 try:
                     await cursor.execute(query, params)
                     await conn.commit()
-                    return Response(success=cursor.rowcount > 0, error=None)
+                    return Response(
+                        success=cursor.rowcount > 0,
+                        lastrowid=cursor.lastrowid or None,
+                        error=None,
+                    )
                 except Exception as e:
                     await conn.rollback()
                     self._logger.info(sys.exc_info())
-                    return Response(success=False, error=str(e))
+                    return Response(success=False, lastrowid=None, error=str(e))
 
     async def insert(self, table, column_values={}):
         """
@@ -636,11 +653,17 @@ class Database:
                     await cursor.execute(insert_stmt, values)
                     await conn.commit()
 
-                    return Response(success=cursor.rowcount > 0, error=None)
+                    return Response(
+                        success=cursor.rowcount > 0,
+                        lastrowid=cursor.lastrowid or None,
+                        error=None,
+                    )
                 except Exception as e:
                     self._logger.debug(f"Transaction failed: {sys.exc_info()}")
                     await conn.rollback()
-                    return Response(success=False, error=(str(e)))
+                    return Response(
+                        success=False, lastrowid=None, error=(str(e))
+                    )
 
     async def update(
         self, table, identifiers=[], column_values={}, conditions=[]
@@ -684,11 +707,15 @@ class Database:
                 try:
                     await cursor.execute(update_stmt, update_values)
                     await conn.commit()
-                    return Response(success=cursor.rowcount > 0, error=None)
+                    return Response(
+                        success=cursor.rowcount > 0,
+                        lastrowid=cursor.lastrowid or None,
+                        error=None,
+                    )
                 except Exception as e:
                     self._logger.debug(f"Transaction failed: {sys.exc_info()}")
                     await conn.rollback()
-                    return Response(success=False, error=str(e))
+                    return Response(success=False, lastrowid=None, error=str(e))
 
     async def upsert(
         self,
