@@ -2,6 +2,7 @@ import re
 import sys
 import traceback
 from collections import namedtuple
+from contextlib import asynccontextmanager
 from typing import NamedTuple, Optional
 
 import aiomysql
@@ -412,12 +413,29 @@ class Database:
         self._pool.close()
         await self._pool.wait_closed()
 
+    @asynccontextmanager
     async def get_conn(self):
         conn = await self._pool.acquire()
         try:
             async with conn.cursor(aiomysql.DictCursor) as cursor:
                 yield conn, cursor
         finally:
+            self._pool.release(conn)
+
+    @asynccontextmanager
+    async def tx(self):
+        """Transaction context manager: begin, commit, rollback automatically."""
+        conn = await self._pool.acquire()
+        cur = await conn.cursor(aiomysql.DictCursor)
+        try:
+            await conn.begin()
+            yield cur
+            await conn.commit()
+        except Exception:
+            await conn.rollback()
+            raise
+        finally:
+            await cur.close()
             self._pool.release(conn)
 
     async def get_rows(self, query, params=()):
