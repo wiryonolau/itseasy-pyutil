@@ -354,7 +354,20 @@ class Database:
 
         return (insert_stmt, values)
 
-    def update_stmt(self, table, identifiers=[], column_values={}):
+    def update_stmt(
+        self, table, identifiers=[], conditions=[], column_values={}
+    ):
+        condition_by_indentifier = []
+        for col in identifiers:
+            condition_by_indentifier.append(
+                Condition(column=col, value=column_values.get(col))
+            )
+
+        conditions = condition_by_indentifier + [
+            ConditionSet(conditions=conditions)
+        ]
+        conditions, params = self.parse_conditions(conditions)
+
         update_columns = {
             key: value
             for key, value in column_values.items()
@@ -364,17 +377,10 @@ class Database:
         set_clause = ", ".join(
             [f"{self.sanitize_identifier(col)}=%s" for col in update_columns]
         )
-        where_clause = " AND ".join(
-            [f"{self.sanitize_identifier(id_col)}=%s" for id_col in identifiers]
-        )
 
-        update_stmt = f"UPDATE {self.sanitize_identifier(table)} SET {set_clause} WHERE {where_clause}"
-        # Update values: exclude identifier columns from set
-        update_condition_values = [column_values.get(i) for i in identifiers]
+        update_stmt = f"UPDATE {self.sanitize_identifier(table)} SET {set_clause} {conditions}"
 
-        update_values = list(update_columns.values()) + list(
-            update_condition_values
-        )
+        update_values = list(update_columns.values()) + params
 
         return (update_stmt, update_values)
 
