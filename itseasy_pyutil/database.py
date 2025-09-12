@@ -53,8 +53,16 @@ class Filter(NamedTuple):
     opr: str = "="
 
 
-class Expression(NamedTuple):
-    expr: str
+class Expression:
+    def __init__(self, expr: str):
+        # Kill multiple statements
+        expr = expr.split(";", 1)[0]
+        # Kill inline comments
+        expr = expr.split("--", 1)[0].split("/*", 1)[0]
+        self._expr = expr.strip()
+
+    def __str__(self):
+        return self._expr
 
 
 class Condition(NamedTuple):
@@ -229,9 +237,11 @@ class Database:
             else:
                 continue
 
+            table = self.sanitize_identifier(table)
             condition_stmt, condition_params = self.parse_conditions(
                 conditions, "ON"
             )
+
             stmts.append(f"{join_type} {table} {condition_stmt}")
             params += condition_params
 
@@ -345,11 +355,12 @@ class Database:
         columns = ",".join(
             [self.sanitize_identifier(c) for c in column_values.keys()]
         )
+        placeholders = ",".join(["%s"] * len(column_values))
         values = list(column_values.values())
 
         # Insert query
         insert_stmt = f"""
-        INSERT INTO {self.sanitize_identifier(table)} ({columns}) VALUES ({', '.join(['%s'] * len(values))})
+        INSERT INTO {self.sanitize_identifier(table)} ({columns}) VALUES ({placeholders})
         """
 
         return (insert_stmt, values)
@@ -745,16 +756,16 @@ class Database:
 
                 try:
                     # Build columns and values for INSERT
-                    columns = [
+                    sanitized_cols = [
                         self.sanitize_identifier(c, allow_star=True)
                         for c in columns
                     ]
-                    columns = ",".join(column_values.keys())
+                    columns_str = ",".join(sanitized_cols)
                     values = tuple(column_values.values())
 
                     # Insert query
                     insert_stmt = f"""
-                    INSERT INTO {self.sanitize_identifier(table)} ({columns}) VALUES ({', '.join(['%s'] * len(values))})
+                    INSERT INTO {self.sanitize_identifier(table)} ({columns_str}) VALUES ({', '.join(['%s'] * len(values))})
                     """
 
                     try:
