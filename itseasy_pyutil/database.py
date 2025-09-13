@@ -61,6 +61,10 @@ class Expression:
         expr = expr.split("--", 1)[0].split("/*", 1)[0]
         self._expr = expr.strip()
 
+    @property
+    def expr(self):
+        return self._expr
+
     def __str__(self):
         return self._expr
 
