@@ -9,6 +9,7 @@ import random
 import string
 import sys
 import uuid
+from collections.abc import Mapping
 from typing import NamedTuple
 
 import dateutil
@@ -275,8 +276,8 @@ def get_attr(obj, path, default=None):
     for part in path.split("."):
         if obj is None:
             return default
-        if isinstance(obj, dict):
-            obj = obj.get(part)
+        if isinstance(obj, Mapping):
+            obj = obj.get(part, default)
         else:
             obj = getattr(obj, part, None)
     return obj if obj is not None else default
