@@ -33,6 +33,18 @@ class UserToken(NamedTuple):
     token: str
 
 
+class EnumHelper(enum.Enum):
+    @classmethod
+    def has_value(cls, value):
+        if not hasattr(cls, "_value_set"):
+            cls._value_set = {e.value for e in cls}
+        return value in cls._value_set
+
+    @classmethod
+    def has_name(cls, name):
+        return name in cls.__members__
+
+
 class LoggerAware:
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -287,7 +299,7 @@ def has_attr(obj, path):
     for part in path.split("."):
         if obj is None:
             return False
-        if isinstance(obj, dict):
+        if isinstance(obj, Mapping):
             if part not in obj:
                 return False
             obj = obj[part]
@@ -301,7 +313,12 @@ def has_attr(obj, path):
 def set_attr(obj, path, value):
     parts = path.split(".")
     for part in parts[:-1]:
-        if isinstance(obj, dict):
+        if isinstance(obj, Mapping):
+            # For mappings, we need to ensure mutability
+            if not hasattr(obj, "__setitem__"):
+                raise TypeError(
+                    f"Cannot set value on non-mutable Mapping: {type(obj)}"
+                )
             if part not in obj or obj[part] is None:
                 obj[part] = {}
             obj = obj[part]
@@ -313,7 +330,11 @@ def set_attr(obj, path, value):
             obj = getattr(obj, part)
 
     last = parts[-1]
-    if isinstance(obj, dict):
+    if isinstance(obj, Mapping):
+        if not hasattr(obj, "__setitem__"):
+            raise TypeError(
+                f"Cannot set value on non-mutable Mapping: {type(obj)}"
+            )
         obj[last] = value
     else:
         setattr(obj, last, value)
@@ -437,3 +458,24 @@ def normalize_json(value):
     if isinstance(value, list):
         return value
     raise ValueError("data must be a JSON string, dict, list or None")
+
+
+def in_enum(value, enum_class, use_name=False):
+    if use_name:
+        return value in enum_class.__members__  # dict lookup O(1)
+    return any(value == item.value for item in enum_class)  # st
+
+
+def enum_names(enum_cls):
+    return [e.name for e in enum_cls]
+
+
+def enum_values(enum_cls):
+    return [e.value for e in enum_cls]
+
+
+def as_enum(enum_cls, value, default=None):
+    try:
+        return enum_cls(value)
+    except ValueError:
+        return default
