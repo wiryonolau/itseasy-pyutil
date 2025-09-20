@@ -289,7 +289,8 @@ class Database:
                 if isinstance(value, bool):
                     value = int(value)
 
-                column = self.sanitize_identifier(identifier=column)
+                if not isinstance(column, Expression):
+                    column = self.sanitize_identifier(identifier=column)
 
                 condition = Condition(
                     column=column, value=value, opr=opr, glue=glue
