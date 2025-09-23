@@ -479,3 +479,21 @@ def as_enum(enum_cls, value, default=None):
         return enum_cls(value)
     except ValueError:
         return default
+
+
+def normalize_uuid(value) -> uuid.UUID:
+    """
+    Normalize input into a uuid.UUID object.
+    Accepts:
+      - uuid.UUID
+      - string UUID
+      - bytes (16 long)
+    """
+    if isinstance(value, uuid.UUID):
+        return value
+    elif isinstance(value, str):
+        return uuid.UUID(value)
+    elif isinstance(value, bytes) and len(value) == 16:
+        return uuid.UUID(bytes=value)
+    else:
+        raise ValueError(f"Invalid UUID value: {value}")
