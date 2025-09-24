@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 from typing import NamedTuple, Optional
 
 import aiomysql
+import pymysql
 
 from itseasy_pyutil import get_logger, list_get
 
@@ -216,6 +217,8 @@ class Database:
                     formatted_val = str(int(val))
                 elif isinstance(val, int):
                     formatted_val = str(val)
+                elif isinstance(val, bytes):
+                    formatted_val = val.hex()
                 elif val is None:
                     formatted_val = "NULL"
                 else:
@@ -288,6 +291,8 @@ class Database:
 
                 if isinstance(value, bool):
                     value = int(value)
+                elif isinstance(value, bytes):
+                    value = pymysql.Binary(value)
 
                 if not isinstance(column, Expression):
                     column = self.sanitize_identifier(identifier=column)
