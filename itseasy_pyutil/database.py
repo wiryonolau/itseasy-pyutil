@@ -662,7 +662,7 @@ class Database:
                     # Build columns and values for INSERT
                     columns = [
                         self.sanitize_identifier(c, allow_star=True)
-                        for c in columns
+                        for c in column_values.keys()
                     ]
                     columns = ",".join(column_values.keys())
                     values = tuple(column_values.values())
@@ -768,7 +768,7 @@ class Database:
                     # Build columns and values for INSERT
                     sanitized_cols = [
                         self.sanitize_identifier(c, allow_star=True)
-                        for c in columns
+                        for c in column_values.keys()
                     ]
                     columns_str = ",".join(sanitized_cols)
                     values = tuple(column_values.values())
