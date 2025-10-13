@@ -779,6 +779,11 @@ class Database:
                     """
 
                     try:
+                        if self._as_dev:
+                            self._logger.debug(
+                                self.get_sql_string(insert_stmt, values)
+                            )
+
                         await cursor.execute(insert_stmt, values)
                     except Exception as e:
                         error = str(e.args[1])
@@ -813,6 +818,13 @@ class Database:
                         )
 
                         try:
+                            if self._as_dev:
+                                self._logger.debug(
+                                    self.get_sql_string(
+                                        update_stmt, update_values
+                                    )
+                                )
+
                             await cursor.execute(update_stmt, update_values)
                             if not cursor.rowcount:
                                 raise Exception(error)
