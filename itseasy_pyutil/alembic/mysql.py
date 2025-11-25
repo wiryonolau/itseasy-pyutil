@@ -526,7 +526,7 @@ def sync_unique_constraints(connection):
                     )
 
 
-def sync_schema(engine):
+def sync_schema(engine, metadata):
     """Ensure schema consistency."""
     with engine.begin() as conn:
         conn.execute(text("SET SESSION sql_mode = ''"))
