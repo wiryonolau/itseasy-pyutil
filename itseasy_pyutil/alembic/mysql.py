@@ -148,7 +148,7 @@ def column_info(connection, table_name, column_name):
     return None
 
 
-def remove_old_tables(connection):
+def remove_old_tables(connection, metadata):
     """Find and drop tables that are not in the schema."""
     inspector = inspect(connection)
     existing_tables = set(inspector.get_table_names())
@@ -163,7 +163,7 @@ def remove_old_tables(connection):
             print(f"Error dropping {table}: {e}")
 
 
-def remove_old_columns(connection):
+def remove_old_columns(connection, metadata):
     """Find and drop columns that are not in the schema."""
     inspector = inspect(connection)
 
@@ -352,7 +352,7 @@ def remove_column_fk(connection, table_name, column_name):
         )
 
 
-def sync_primary_keys(connection):
+def sync_primary_keys(connection, metadata):
     """Ensure primary keys match the schema definition."""
     inspector = inspect(connection)
 
@@ -391,7 +391,7 @@ def sync_primary_keys(connection):
                     print(f"Error creating primary key on {table_name}: {e}")
 
 
-def sync_indexes(connection):
+def sync_indexes(connection, metadata):
     """Ensure all indexes are correctly defined in the database."""
     inspector = inspect(connection)
 
@@ -422,7 +422,7 @@ def sync_indexes(connection):
                     connection.execute(text(str(index.create(connection))))
 
 
-def sync_foreign_keys(connection):
+def sync_foreign_keys(connection, metadata):
     """Ensure foreign keys match the schema without dropping valid ones."""
     inspector = inspect(connection)
 
@@ -482,7 +482,7 @@ def sync_foreign_keys(connection):
                     print(f"Error dropping foreign key on {table_name}: {e}")
 
 
-def sync_unique_constraints(connection):
+def sync_unique_constraints(connection, metadata):
     """Ensure unique constraints match the schema."""
     inspector = inspect(connection)
 
@@ -535,8 +535,8 @@ def sync_schema(engine, metadata):
         for table in metadata.tables.values():
             table.create(conn, checkfirst=True)
 
-        remove_old_tables(conn)
-        remove_old_columns(conn)
+        remove_old_tables(conn, metadata)
+        remove_old_columns(conn, metadata)
 
         for table_name, table_obj in metadata.tables.items():
             for column_name, column_obj in table_obj.columns.items():
@@ -544,9 +544,9 @@ def sync_schema(engine, metadata):
                     conn, table_name, column_name, column_obj
                 )
 
-        sync_primary_keys(conn)
-        sync_indexes(conn)
-        sync_foreign_keys(conn)
-        sync_unique_constraints(conn)
+        sync_primary_keys(conn, metadata)
+        sync_indexes(conn, metadata)
+        sync_foreign_keys(conn, metadata)
+        sync_unique_constraints(conn, metadata)
 
         conn.execute(text("SET FOREIGN_KEY_CHECKS = 1"))
