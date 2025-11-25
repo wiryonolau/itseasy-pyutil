@@ -104,6 +104,18 @@ def get_env(key, placeholder=None):
     return value
 
 
+def get_local_secret(secret_dir, name, placeholder=None):
+    """
+    load secret for dev / non docker
+    """
+    try:
+        secret_file = os.path.abspath(os.path.join(secret_dir, name))
+        with open(secret_file, "r") as f:
+            return f.read()
+    except:
+        return placeholder
+
+
 def get_docker_secret(path, placeholder=None, path_from_env=False):
     if path_from_env:
         path = get_env(path, None)

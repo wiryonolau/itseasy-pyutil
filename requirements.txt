@@ -4,19 +4,39 @@
 #
 #    pip-compile
 #
+aiomysql==0.3.2
+    # via itseasy_pyutil (setup.py)
+alembic==1.17.2
+    # via itseasy_pyutil (setup.py)
 argon2-cffi==25.1.0
-    # via pyutil (setup.py)
+    # via itseasy_pyutil (setup.py)
 argon2-cffi-bindings==25.1.0
     # via argon2-cffi
-cffi==1.17.1
+cffi==2.0.0
     # via argon2-cffi-bindings
-pycparser==2.22
+greenlet==3.2.4
+    # via sqlalchemy
+mako==1.3.10
+    # via alembic
+markupsafe==3.0.3
+    # via mako
+pycparser==2.23
     # via cffi
 pyjwt==2.10.1
-    # via pyutil (setup.py)
+    # via itseasy_pyutil (setup.py)
 pymysql==1.1.2
-    # via pyutil (setup.py)
+    # via
+    #   aiomysql
+    #   itseasy_pyutil (setup.py)
 python-dateutil==2.9.0.post0
-    # via pyutil (setup.py)
+    # via itseasy_pyutil (setup.py)
 six==1.17.0
     # via python-dateutil
+sqlalchemy==2.0.44
+    # via
+    #   alembic
+    #   itseasy_pyutil (setup.py)
+typing-extensions==4.15.0
+    # via
+    #   alembic
+    #   sqlalchemy

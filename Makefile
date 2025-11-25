@@ -14,6 +14,7 @@ all:
 	@echo ""
 install:
 	rm -f requirements.txt || true
+	/usr/bin/env python -m pip install "pip==25.1.1" --upgrade
 	/usr/bin/env pip3 install -U pip-tools setuptools
 	pip-compile -v
 	/usr/bin/env pip3 install --cache-dir $$(pwd)/.cache -r requirements.txt
