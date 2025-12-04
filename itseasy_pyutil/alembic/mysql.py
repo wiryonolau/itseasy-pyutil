@@ -3,15 +3,9 @@ import sys
 from logging.config import fileConfig
 
 from alembic import context
-from sqlalchemy import (
-    CheckConstraint,
-    ForeignKeyConstraint,
-    PrimaryKeyConstraint,
-    UniqueConstraint,
-    create_engine,
-    inspect,
-    text,
-)
+from sqlalchemy import (CheckConstraint, ForeignKeyConstraint,
+                        PrimaryKeyConstraint, UniqueConstraint, create_engine,
+                        inspect, text)
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.sql.elements import TextClause
 from sqlalchemy.sql.schema import DefaultClause, ScalarElementColumnDefault
@@ -379,42 +373,41 @@ def remove_column_fk(connection, table_name, column_name):
 
 
 def sync_primary_keys(connection, metadata):
-    """Ensure primary keys match the schema definition."""
     inspector = inspect(connection)
 
     for table_name, table_obj in metadata.tables.items():
         existing_pk = inspector.get_pk_constraint(table_name)
-        existing_pk_columns = (
-            set(existing_pk["constrained_columns"]) if existing_pk else set()
-        )
+        existing_pk_columns = set(existing_pk["constrained_columns"]) if existing_pk else set()
+        model_pk_columns = set(col.name for col in table_obj.primary_key.columns)
 
-        model_pk = [col.name for col in table_obj.primary_key.columns]
-        model_pk_columns = set(model_pk)
+        # PK already matches → skip
+        if existing_pk_columns == model_pk_columns:
+            continue
 
-        if existing_pk_columns != model_pk_columns:
-            if existing_pk_columns:
-                # Drop the existing primary key
-                print(f"Dropping outdated primary key on {table_name}")
-                try:
-                    connection.execute(
-                        text(f"ALTER TABLE `{table_name}` DROP PRIMARY KEY")
-                    )
-                except SQLAlchemyError as e:
-                    print(f"Error dropping primary key on {table_name}: {e}")
-                    continue  # Skip re-adding if we failed to drop
+        # Get auto-increment columns
+        cols_info = inspector.get_columns(table_name)
+        auto_inc_cols = {col["name"] for col in cols_info if col.get("autoincrement") in (True, "auto")}
 
-            if model_pk_columns:
-                # Recreate the correct primary key
-                pk_columns = ", ".join(f"`{col}`" for col in model_pk_columns)
-                print(f"Creating primary key ({pk_columns}) on {table_name}")
-                try:
-                    connection.execute(
-                        text(
-                            f"ALTER TABLE `{table_name}` ADD PRIMARY KEY ({pk_columns})"
-                        )
-                    )
-                except SQLAlchemyError as e:
-                    print(f"Error creating primary key on {table_name}: {e}")
+        try:
+            if auto_inc_cols:
+                # Must drop/add PK in one step to avoid 1075
+                pk_cols = ", ".join(f"`{col}`" for col in model_pk_columns)
+                sql = f"ALTER TABLE `{table_name}` DROP PRIMARY KEY, ADD PRIMARY KEY ({pk_cols})"
+                connection.execute(text(sql))
+            else:
+                # Drop PK first
+                if existing_pk_columns:
+                    connection.execute(text(f"ALTER TABLE `{table_name}` DROP PRIMARY KEY"))
+                # Add new PK
+                if model_pk_columns:
+                    pk_cols = ", ".join(f"`{col}`" for col in model_pk_columns)
+                    connection.execute(text(f"ALTER TABLE `{table_name}` ADD PRIMARY KEY ({pk_cols})"))
+
+            print(f"PK synced for table {table_name}")
+
+        except SQLAlchemyError as e:
+            print(f"Error syncing PK for {table_name}: {e}")
+            continue
 
 
 def sync_indexes(connection, metadata):
