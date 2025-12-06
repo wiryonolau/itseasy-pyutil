@@ -411,34 +411,42 @@ def sync_primary_keys(connection, metadata):
 
 
 def sync_indexes(connection, metadata):
-    """Ensure all indexes are correctly defined in the database."""
     inspector = inspect(connection)
 
     for table_name, table_obj in metadata.tables.items():
+        # get existing indexes
         existing_indexes = {
-            index["name"]: index for index in inspector.get_indexes(table_name)
+            idx["name"]: idx
+            for idx in inspector.get_indexes(table_name)
         }
 
-        for index in table_obj.indexes:
-            existing_index = existing_indexes.get(index.name)
+        for idx in table_obj.indexes:
+            name = idx.name
 
-            if not existing_index:
-                # Index is missing, create it
-                print(f"Creating missing index: {index.name} on {table_name}")
-                connection.execute(text(str(index.create(connection))))
-            else:
-                # Compare and replace index if structure differs
-                existing_columns = set(existing_index["column_names"])
-                new_columns = set(index.expressions)
+            # SQLAlchemy Index → column names
+            defined_cols = [col.name for col in idx.columns]
 
-                if existing_columns != new_columns:
-                    print(
-                        f"Replacing outdated index: {index.name} on {table_name}"
-                    )
-                    connection.execute(
-                        text(f"DROP INDEX `{index.name}` ON `{table_name}`")
-                    )
-                    connection.execute(text(str(index.create(connection))))
+            existing = existing_indexes.get(name)
+
+            if not existing:
+                print(f"Creating index {name} on {table_name}")
+                idx.create(connection)
+                continue
+
+            existing_cols = existing["column_names"]
+
+            # compare ordered list, not set
+            if existing_cols != defined_cols:
+                print(
+                    f"Rebuilding index {name} on {table_name} "
+                    f"(old: {existing_cols}, new: {defined_cols})"
+                )
+                # drop index safely
+                connection.execute(
+                    text(f"DROP INDEX `{name}` ON `{table_name}`")
+                )
+                # recreate
+                idx.create(connection)
 
 
 def sync_foreign_keys(connection, metadata):
