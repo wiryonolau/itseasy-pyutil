@@ -143,7 +143,7 @@ class Database:
 
         return identifier
 
-    def filter_to_conditions(self, filters=[]):
+    def filter_to_conditions(self, filters=[], mapping={}):
         """
         Convert filter from front end to condition, beware of sql injection
         """
@@ -191,8 +191,10 @@ class Database:
                 if not len(str(value)):
                     continue
 
+                column = mapping.get(obj.id, obj.id)
+
                 conditions.append(
-                    Condition(column=obj.id, value=value, opr=opr)
+                    Condition(column=column, value=value, opr=opr)
                 )
             except:
                 continue
