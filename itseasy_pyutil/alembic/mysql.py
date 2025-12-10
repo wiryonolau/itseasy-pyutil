@@ -251,7 +251,7 @@ def column_has_update(existing, new):
     if new_scale is not None and existing_scale != new_scale:
         return True
 
-    if new_type == "enum" and existing_col_type.lower() != new_col_type.lower():
+    if new_type == "enum" and existing_col_type != new_col_type:
         return True
 
     for k, v in existing_erratas.items():
@@ -270,7 +270,7 @@ def modify_column_if_needed(connection, table_name, column_name, column_obj):
     new_col_type = new_type
     if new_type.lower() == "enum":
         enum_class = getattr(column_obj.type, "enum_class")
-        enum_name = ["'{}'".format(e.name) for e in enum_class]
+        enum_name = ["'{}'".format(e.value) for e in enum_class]
         new_col_type = "enum({})".format(",".join(enum_name))
 
     new_nullable = "yes" if column_obj.nullable else "no"
