@@ -408,7 +408,7 @@ class DDLManager:
             return
         
         if drop:
-            self.conn.execuet(sa.text(f"DROP TRIGGER IF EXISTS {name}"))
+            self.conn.execute(sa.text(f"DROP TRIGGER IF EXISTS {name}"))
 
         self.conn.execute(sa.text(sql))
 
@@ -430,7 +430,7 @@ class DDLManager:
             return
 
         if drop:
-            self.conn.execuet(sa.text(f"DROP TRIGGER IF EXISTS {name}"))
+            self.conn.execute(sa.text(f"DROP TRIGGER IF EXISTS {name}"))
 
         sql = f"""
             CREATE TRIGGER {name}
@@ -459,7 +459,7 @@ class DDLManager:
             return
 
         if drop:
-            self.conn.execuet(sa.text(f"DROP PROCEDURE IF EXISTS {name}"))
+            self.conn.execute(sa.text(f"DROP PROCEDURE IF EXISTS {name}"))
 
         sql = f"CREATE PROCEDURE {name} {body}"
         self.conn.execute(sa.text(sql))
