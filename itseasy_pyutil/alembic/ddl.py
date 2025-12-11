@@ -290,7 +290,7 @@ class DDLManager:
 
 
 
-    def create_audit_trigger(self, table_name, pk_column, exclude_columns=None):
+    def create_audit_trigger(self, table_name, pk_column, exclude_columns=None, drop=False):
         if exclude_columns is None:
             exclude_columns = []
 
@@ -386,14 +386,14 @@ class DDLManager:
         #
         # Create triggers immediately
         #
-        self.create_trigger(trg_a_ins, sql_a_ins)
-        self.create_trigger(trg_a_upd, sql_a_upd)
-        self.create_trigger(trg_a_del, sql_a_del)
+        self.create_trigger(trg_a_ins, sql_a_ins, drop=drop)
+        self.create_trigger(trg_a_upd, sql_a_upd, drop=drop)
+        self.create_trigger(trg_a_del, sql_a_del, drop=drop)
 
         print(f"Audit triggers created for table '{table_name}'")
 
 
-    def create_trigger(self, name, sql):
+    def create_trigger(self, name, sql, drop=False):
         print(f"Create trigger for {name}")
         exists = self.conn.execute(
             sa.text("""
@@ -404,13 +404,16 @@ class DDLManager:
             {"name": name},
         ).fetchone()
 
-        if exists:
+        if exists and not drop:
             return
+        
+        if drop:
+            self.conn.execuet(sa.text(f"DROP TRIGGER IF EXISTS {name}"))
 
         self.conn.execute(sa.text(sql))
 
 
-    def create_modified_trigger(self, table):
+    def create_modified_trigger(self, table, drop=False):
         name = f"{table}_BUPD"
         print(f"Create modified trigger {name} for {table}")
 
@@ -423,8 +426,11 @@ class DDLManager:
             {"name": name},
         ).fetchone()
 
-        if exists:
+        if exists and not drop:
             return
+
+        if drop:
+            self.conn.execuet(sa.text(f"DROP TRIGGER IF EXISTS {name}"))
 
         sql = f"""
             CREATE TRIGGER {name}
@@ -438,7 +444,7 @@ class DDLManager:
         self.conn.execute(sa.text(sql))
 
 
-    def create_procedure(self, name, body):
+    def create_procedure(self, name, body, drop=False):
         exists = self.conn.execute(
             sa.text("""
                 SELECT 1 FROM information_schema.ROUTINES
@@ -449,8 +455,11 @@ class DDLManager:
             {"name": name},
         ).fetchone()
 
-        if exists:
+        if exists and not drop:
             return
+
+        if drop:
+            self.conn.execuet(sa.text(f"DROP PROCEDURE IF EXISTS {name}"))
 
         sql = f"CREATE PROCEDURE {name} {body}"
         self.conn.execute(sa.text(sql))
