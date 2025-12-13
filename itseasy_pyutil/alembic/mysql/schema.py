@@ -3,9 +3,15 @@ import sys
 from logging.config import fileConfig
 
 from alembic import context
-from sqlalchemy import (CheckConstraint, ForeignKeyConstraint,
-                        PrimaryKeyConstraint, UniqueConstraint, create_engine,
-                        inspect, text)
+from sqlalchemy import (
+    CheckConstraint,
+    ForeignKeyConstraint,
+    PrimaryKeyConstraint,
+    UniqueConstraint,
+    create_engine,
+    inspect,
+    text,
+)
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.sql.elements import TextClause
 from sqlalchemy.sql.schema import DefaultClause, ScalarElementColumnDefault
@@ -383,7 +389,9 @@ def sync_primary_keys(connection, metadata):
             else tuple()
         )
 
-        model_pk_columns = tuple(col.name for col in table_obj.primary_key.columns)
+        model_pk_columns = tuple(
+            col.name for col in table_obj.primary_key.columns
+        )
 
         # PK already matches → skip
         if existing_pk_columns == model_pk_columns:
@@ -398,7 +406,9 @@ def sync_primary_keys(connection, metadata):
 
         try:
             # Safety: AUTO_INCREMENT must be part of PK
-            if auto_inc_cols and not auto_inc_cols.issubset(set(model_pk_columns)):
+            if auto_inc_cols and not auto_inc_cols.issubset(
+                set(model_pk_columns)
+            ):
                 raise RuntimeError(
                     f"AUTO_INCREMENT column(s) {auto_inc_cols} must be part of PRIMARY KEY "
                     f"in table {table_name}"
@@ -434,7 +444,6 @@ def sync_primary_keys(connection, metadata):
         except SQLAlchemyError as e:
             print(f"Error syncing PK for {table_name}: {e}")
             continue
-
 
 
 def sync_indexes(connection, metadata):
@@ -474,10 +483,9 @@ def sync_indexes(connection, metadata):
                 f"unique: {existing_unique} → {model_unique})"
             )
 
-            connection.execute(
-                text(f"DROP INDEX `{name}` ON `{table_name}`")
-            )
+            connection.execute(text(f"DROP INDEX `{name}` ON `{table_name}`"))
             idx.create(connection)
+
 
 def normalize_fk_action(action):
     """
@@ -498,6 +506,7 @@ def normalize_fk_action(action):
 
     return action
 
+
 def sync_foreign_keys(connection, metadata):
     inspector = inspect(connection)
 
@@ -511,12 +520,8 @@ def sync_foreign_keys(connection, metadata):
                 tuple(fk["constrained_columns"]),
                 fk["referred_table"],
                 tuple(fk["referred_columns"]),
-                normalize_fk_action(
-                    fk.get("options", {}).get("ondelete")
-                ),
-                normalize_fk_action(
-                    fk.get("options", {}).get("onupdate")
-                ),
+                normalize_fk_action(fk.get("options", {}).get("ondelete")),
+                normalize_fk_action(fk.get("options", {}).get("onupdate")),
             )
             existing_fks[identity] = fk["name"]
 
@@ -617,10 +622,7 @@ def sync_unique_constraints(connection, metadata):
             if identity not in model_uniques:
                 print(f"Dropping unique constraint {name} on {table_name}")
                 connection.execute(
-                    text(
-                        f"ALTER TABLE `{table_name}` "
-                        f"DROP INDEX `{name}`"
-                    )
+                    text(f"ALTER TABLE `{table_name}` " f"DROP INDEX `{name}`")
                 )
 
         # ---- add missing uniques ----
@@ -636,6 +638,7 @@ def sync_unique_constraints(connection, metadata):
 
             print(f"Adding unique constraint {name} on {table_name}")
             connection.execute(text(sql))
+
 
 def sync_check_constraints(connection, metadata):
     inspector = inspect(connection)
@@ -678,10 +681,7 @@ def sync_check_constraints(connection, metadata):
             if identity not in model_checks:
                 print(f"Dropping CHECK constraint {name} on {table_name}")
                 connection.execute(
-                    text(
-                        f"ALTER TABLE `{table_name}` "
-                        f"DROP CHECK `{name}`"
-                    )
+                    text(f"ALTER TABLE `{table_name}` " f"DROP CHECK `{name}`")
                 )
 
         # ---- add missing CHECKs ----
@@ -697,7 +697,7 @@ def sync_check_constraints(connection, metadata):
 
             print(f"Adding CHECK constraint {name} on {table_name}")
             connection.execute(text(sql))
-   
+
 
 def sync_schema(engine, metadata):
     """Ensure schema consistency."""
@@ -722,6 +722,5 @@ def sync_schema(engine, metadata):
         sync_foreign_keys(conn, metadata)
         sync_unique_constraints(conn, metadata)
         sync_check_constraints(conn, metadata)
-    
 
         conn.execute(text("SET FOREIGN_KEY_CHECKS = 1"))

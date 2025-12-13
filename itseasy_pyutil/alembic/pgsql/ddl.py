@@ -13,7 +13,7 @@ class DDLManager:
 
         if app_package is None:
             raise RuntimeError("DDLManager requires app_package=<package>")
-        
+
         if isinstance(app_package, str):
             self.app_package = app_package
         else:
@@ -53,16 +53,18 @@ class DDLManager:
             )
             module = importlib.util.module_from_spec(spec)
 
-            module.__dict__.update({
-                "rename_table": self.rename_table,
-                "rename_column": self.rename_column,
-                "create_partition": self.create_partition,
-                "create_trigger": self.create_trigger,
-                "create_audit_trigger" : self.create_audit_trigger,
-                "create_modified_trigger": self.create_modified_trigger,
-                "create_procedure": self.create_procedure,
-                "run_ddl": self.run_ddl,
-            })
+            module.__dict__.update(
+                {
+                    "rename_table": self.rename_table,
+                    "rename_column": self.rename_column,
+                    "create_partition": self.create_partition,
+                    "create_trigger": self.create_trigger,
+                    "create_audit_trigger": self.create_audit_trigger,
+                    "create_modified_trigger": self.create_modified_trigger,
+                    "create_procedure": self.create_procedure,
+                    "run_ddl": self.run_ddl,
+                }
+            )
 
             spec.loader.exec_module(module)
 
@@ -72,12 +74,14 @@ class DDLManager:
 
     def rename_table(self, old, new):
         exists_new = self.conn.execute(
-            sa.text("""
+            sa.text(
+                """
                 SELECT 1
                 FROM information_schema.tables
                 WHERE table_schema = 'public'
                 AND table_name = :name
-            """),
+            """
+            ),
             {"name": new},
         ).fetchone()
 
@@ -85,12 +89,14 @@ class DDLManager:
             return
 
         exists_old = self.conn.execute(
-            sa.text("""
+            sa.text(
+                """
                 SELECT 1
                 FROM information_schema.tables
                 WHERE table_schema = 'public'
                 AND table_name = :name
-            """),
+            """
+            ),
             {"name": old},
         ).fetchone()
 
@@ -101,13 +107,15 @@ class DDLManager:
 
     def rename_column(self, table, old, new):
         exists_new = self.conn.execute(
-            sa.text("""
+            sa.text(
+                """
                 SELECT 1
                 FROM information_schema.columns
                 WHERE table_schema = 'public'
                 AND table_name = :table
                 AND column_name = :col
-            """),
+            """
+            ),
             {"table": table, "col": new},
         ).fetchone()
 
@@ -115,22 +123,33 @@ class DDLManager:
             return
 
         old_col = self.conn.execute(
-            sa.text("""
+            sa.text(
+                """
                 SELECT data_type, is_nullable, column_default
                 FROM information_schema.columns
                 WHERE table_schema = 'public'
                 AND table_name = :table
                 AND column_name = :col
-            """),
+            """
+            ),
             {"table": table, "col": old},
         ).fetchone()
 
         if not old_col:
             return
 
-        self.conn.execute(sa.text(f'ALTER TABLE "{table}" RENAME COLUMN "{old}" TO "{new}";'))
+        self.conn.execute(
+            sa.text(f'ALTER TABLE "{table}" RENAME COLUMN "{old}" TO "{new}";')
+        )
 
-    def create_partition(self, table, column="created_at", year=None, mode="year", months_ahead=12):
+    def create_partition(
+        self,
+        table,
+        column="created_at",
+        year=None,
+        mode="year",
+        months_ahead=12,
+    ):
         now = datetime.datetime.utcnow()
         year = year or now.year
 
@@ -142,13 +161,15 @@ class DDLManager:
             upper = year + 1
 
             exists = self.conn.execute(
-                sa.text("""
+                sa.text(
+                    """
                     SELECT 1
                     FROM pg_inherits
                     JOIN pg_class parent ON pg_inherits.inhparent = parent.oid
                     JOIN pg_class child ON pg_inherits.inhrelid = child.oid
                     WHERE parent.relname = :table AND child.relname = :pname
-                """),
+                """
+                ),
                 {"table": table, "pname": pname},
             ).fetchone()
 
@@ -171,13 +192,15 @@ class DDLManager:
                 )
 
                 exists = self.conn.execute(
-                    sa.text("""
+                    sa.text(
+                        """
                         SELECT 1
                         FROM pg_inherits
                         JOIN pg_class parent ON pg_inherits.inhparent = parent.oid
                         JOIN pg_class child ON pg_inherits.inhrelid = child.oid
                         WHERE parent.relname = :table AND child.relname = :pname
-                    """),
+                    """
+                    ),
                     {"table": table, "pname": pname},
                 ).fetchone()
 
@@ -195,24 +218,33 @@ class DDLManager:
         else:
             raise ValueError("Unsupported partition mode")
 
-    def create_audit_trigger(self, table_name, pk_column, exclude_columns=None, drop=False):
+    def create_audit_trigger(
+        self, table_name, pk_column, exclude_columns=None, drop=False
+    ):
         if exclude_columns is None:
             exclude_columns = []
 
-        rows = self.conn.execute(sa.text("""
+        rows = self.conn.execute(
+            sa.text(
+                """
             SELECT column_name
             FROM information_schema.columns
             WHERE table_schema = 'public'
             AND table_name = :table
             ORDER BY ordinal_position
-        """), {"table": table_name}).fetchall()
+        """
+            ),
+            {"table": table_name},
+        ).fetchall()
 
         columns = [r[0] for r in rows]
         diff_cols = [c for c in columns if c not in exclude_columns]
 
         json_old = ", ".join([f"'{c}', OLD.{c}" for c in diff_cols])
         json_new = ", ".join([f"'{c}', NEW.{c}" for c in diff_cols])
-        change_conditions = " OR ".join([f"OLD.{c} IS DISTINCT FROM NEW.{c}" for c in diff_cols])
+        change_conditions = " OR ".join(
+            [f"OLD.{c} IS DISTINCT FROM NEW.{c}" for c in diff_cols]
+        )
 
         trg_a_ins = f"{table_name}_AINS"
         sql_a_ins = f"""

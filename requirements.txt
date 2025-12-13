@@ -18,6 +18,8 @@ mako==1.3.10
     # via alembic
 markupsafe==3.0.3
     # via mako
+psycopg2-binary==2.9.11
+    # via itseasy-pyutil (setup.cfg)
 pycparser==2.23
     # via cffi
 pyjwt==2.10.1

@@ -42,6 +42,17 @@ ORDER_PATTERN = re.compile(
 )
 
 
+def enum_check(column_name: str, enum_cls):
+    """
+    Returns SQL string for a CHECK constraint enforcing enum values.
+
+    Example:
+        CheckConstraint(enum_check("category", EntityCategoryEnum))
+    """
+    values = ", ".join(repr(e.value) for e in enum_cls)
+    return f'"{column_name}" IN ({values})'
+
+
 class Filter(NamedTuple):
     """
     Filter format from frontend
@@ -98,7 +109,7 @@ class Response(NamedTuple):
 
 
 class DatabaseAware:
-    def __init__(self, db: "Database", *args, **kwargs):
+    def __init__(self, db: "AbstractDatabase", *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._db = db
 
