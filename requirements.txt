@@ -8,6 +8,8 @@ argon2-cffi==25.1.0
     # via itseasy-pyutil (setup.cfg)
 argon2-cffi-bindings==25.1.0
     # via argon2-cffi
+asyncpg==0.31.0
+    # via itseasy-pyutil (setup.cfg)
 cffi==2.0.0
     # via argon2-cffi-bindings
 greenlet==3.3.0
