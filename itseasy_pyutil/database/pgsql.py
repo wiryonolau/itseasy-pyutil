@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 import asyncpg
 
 from itseasy_pyutil import get_logger, list_get
-from itseasy_pyutil.database.base import (
+from itseasy_pyutil.database import (
     ORDER_PATTERN,
     SAFE_IDENTIFIER,
     SAFE_IDENTIFIER_WITH_STAR,
