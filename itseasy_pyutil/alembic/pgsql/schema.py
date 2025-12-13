@@ -340,127 +340,356 @@ def remove_old_columns(connection, metadata):
 def sync_primary_keys(connection, metadata):
     inspector = inspect(connection)
 
-    for table_name, table_obj in metadata.tables.items():
-        existing_pk = inspector.get_pk_constraint(table_name)
-        existing_pk_columns = set(existing_pk["constrained_columns"]) if existing_pk else set()
-        model_pk_columns = set(col.name for col in table_obj.primary_key.columns)
+    for table in metadata.tables.values():
+        table_name = table.name
+        schema = table.schema
+
+        fq_table = (
+            f'"{schema}"."{table_name}"'
+            if schema else f'"{table_name}"'
+        )
+
+        existing_pk = inspector.get_pk_constraint(table_name, schema=schema)
+        existing_pk_columns = (
+            tuple(existing_pk["constrained_columns"])
+            if existing_pk and existing_pk.get("constrained_columns")
+            else tuple()
+        )
+
+        model_pk_columns = tuple(col.name for col in table.primary_key.columns)
 
         if existing_pk_columns == model_pk_columns:
             continue
 
         try:
-            if existing_pk_columns:
-                connection.execute(text(f'ALTER TABLE "{table_name}" DROP CONSTRAINT "{existing_pk["name"]}"'))
-            if model_pk_columns:
-                pk_cols = ", ".join(f'"{col}"' for col in model_pk_columns)
-                connection.execute(text(f'ALTER TABLE "{table_name}" ADD PRIMARY KEY ({pk_cols})'))
+            # Drop existing PK if present
+            if existing_pk_columns and existing_pk.get("name"):
+                connection.execute(
+                    text(
+                        f'ALTER TABLE {fq_table} '
+                        f'DROP CONSTRAINT "{existing_pk["name"]}"'
+                    )
+                )
 
-            print(f"PK synced for table {table_name}")
+            # Add new PK if defined in model
+            if model_pk_columns:
+                pk_cols = ", ".join(f'"{c}"' for c in model_pk_columns)
+                connection.execute(
+                    text(
+                        f'ALTER TABLE {fq_table} '
+                        f'ADD PRIMARY KEY ({pk_cols})'
+                    )
+                )
+
+            print(f"PK synced for table {fq_table}")
+
         except SQLAlchemyError as e:
-            print(f"Error syncing PK for {table_name}: {e}")
+            print(f"Error syncing PK for {fq_table}: {e}")
 
 
 def sync_indexes(connection, metadata):
     inspector = inspect(connection)
 
-    for table_name, table_obj in metadata.tables.items():
-        existing_indexes = {idx["name"]: idx for idx in inspector.get_indexes(table_name)}
+    for table in metadata.tables.values():
+        table_name = table.name
+        schema = table.schema
 
-        for idx in table_obj.indexes:
+        fq_table = (
+            f'"{schema}"."{table_name}"'
+            if schema else f'"{table_name}"'
+        )
+
+        # Existing indexes in DB (exclude PK & unique constraints)
+        existing_indexes = {
+            idx["name"]: idx
+            for idx in inspector.get_indexes(table_name, schema=schema)
+        }
+
+        for idx in table.indexes:
             name = idx.name
-            defined_cols = [col.name for col in idx.columns]
+            model_cols = tuple(col.name for col in idx.columns)
+            model_unique = idx.unique
+
             existing = existing_indexes.get(name)
-            if not existing or existing["column_names"] != defined_cols:
-                print(f"Rebuilding index {name} on {table_name}")
-                if existing:
-                    connection.execute(text(f'DROP INDEX "{name}"'))
-                idx.create(connection)
+
+            needs_rebuild = (
+                not existing
+                or tuple(existing["column_names"]) != model_cols
+                or bool(existing.get("unique")) != bool(model_unique)
+            )
+
+            if not needs_rebuild:
+                continue
+
+            print(f"Rebuilding index {name} on {fq_table}")
+
+            # Drop existing index if present
+            if existing:
+                fq_index = (
+                    f'"{schema}"."{name}"'
+                    if schema else f'"{name}"'
+                )
+                connection.execute(
+                    text(f'DROP INDEX {fq_index}')
+                )
+
+            # Build CREATE INDEX statement
+            cols_sql = ", ".join(f'"{c}"' for c in model_cols)
+            unique_sql = "UNIQUE " if model_unique else ""
+
+            connection.execute(
+                text(
+                    f'CREATE {unique_sql}INDEX "{name}" '
+                    f'ON {fq_table} ({cols_sql})'
+                )
+            )
+
+
 
 
 def sync_foreign_keys(connection, metadata):
     inspector = inspect(connection)
 
-    for table_name, table_obj in metadata.tables.items():
-        existing_fks = {
-            tuple(fk["constrained_columns"]): {
-                "referred_table": fk["referred_table"],
-                "referred_columns": tuple(fk["referred_columns"]),
-                "name": fk["name"],
-            }
-            for fk in inspector.get_foreign_keys(table_name)
-        }
+    for table in metadata.tables.values():
+        table_name = table.name
+        schema = table.schema
 
-        model_fks = {}
-        for constraint in table_obj.constraints:
+        fq_table = (
+            f'"{schema}"."{table_name}"'
+            if schema else f'"{table_name}"'
+        )
+
+        # ---- EXISTING FKs (from DB) ----
+        existing = {}
+        for fk in inspector.get_foreign_keys(table_name, schema=schema):
+            key = (
+                tuple(fk["constrained_columns"]),
+                fk["referred_schema"],
+                fk["referred_table"],
+                tuple(fk["referred_columns"]),
+            )
+            existing[key] = fk["name"]
+
+        # ---- MODEL FKs ----
+        model = {}
+        for constraint in table.constraints:
             if isinstance(constraint, ForeignKeyConstraint):
-                cols = tuple(constraint.column_keys)
-                ref_table = constraint.elements[0].column.table.name
-                ref_cols = tuple(elem.column.name for elem in constraint.elements)
-                model_fks[cols] = (ref_table, ref_cols)
+                local_cols = tuple(constraint.column_keys)
 
-        for cols, (ref_table, ref_cols) in model_fks.items():
-            if cols not in existing_fks:
-                col_str = ", ".join(f'"{c}"' for c in cols)
-                ref_str = ", ".join(f'"{c}"' for c in ref_cols)
-                connection.execute(text(f'ALTER TABLE "{table_name}" ADD FOREIGN KEY ({col_str}) REFERENCES "{ref_table}" ({ref_str})'))
+                elem = constraint.elements[0]
+                ref_table = elem.column.table
+                ref_schema = ref_table.schema
+                ref_table_name = ref_table.name
+                ref_cols = tuple(e.column.name for e in constraint.elements)
 
-        for cols, fk_info in existing_fks.items():
-            if cols not in model_fks:
-                connection.execute(text(f'ALTER TABLE "{table_name}" DROP CONSTRAINT "{fk_info["name"]}"'))
+                key = (
+                    local_cols,
+                    ref_schema,
+                    ref_table_name,
+                    ref_cols,
+                )
+                model[key] = constraint.name
+
+        # ---- DROP missing or changed FKs ----
+        for key, fk_name in existing.items():
+            if key not in model:
+                connection.execute(
+                    text(
+                        f'ALTER TABLE {fq_table} '
+                        f'DROP CONSTRAINT "{fk_name}"'
+                    )
+                )
+
+        # ---- ADD missing FKs ----
+        for key, fk_name in model.items():
+            if key not in existing:
+                local_cols, ref_schema, ref_table, ref_cols = key
+
+                local_sql = ", ".join(f'"{c}"' for c in local_cols)
+                ref_sql = ", ".join(f'"{c}"' for c in ref_cols)
+
+                fq_ref = (
+                    f'"{ref_schema}"."{ref_table}"'
+                    if ref_schema else f'"{ref_table}"'
+                )
+
+                connection.execute(
+                    text(
+                        f'ALTER TABLE {fq_table} '
+                        f'ADD CONSTRAINT "{fk_name}" '
+                        f'FOREIGN KEY ({local_sql}) '
+                        f'REFERENCES {fq_ref} ({ref_sql})'
+                    )
+                )
 
 
 def sync_unique_constraints(connection, metadata):
     inspector = inspect(connection)
 
-    for table_name, table_obj in metadata.tables.items():
-        existing_uniques = {c["name"]: set(c["column_names"]) for c in inspector.get_unique_constraints(table_name)}
-        model_uniques = {c.name: set(c.columns.keys()) for c in table_obj.constraints if isinstance(c, UniqueConstraint) and c.name}
+    for table in metadata.tables.values():
+        table_name = table.name
+        schema = table.schema
 
-        for name in existing_uniques.keys() - model_uniques.keys():
-            connection.execute(text(f'DROP INDEX "{name}"'))
+        fq_table = (
+            f'"{schema}"."{table_name}"'
+            if schema else f'"{table_name}"'
+        )
 
-        for name, cols in model_uniques.items():
-            if name not in existing_uniques:
+        existing = {
+            c["name"]: tuple(c["column_names"])
+            for c in inspector.get_unique_constraints(table_name, schema=schema)
+            if c["name"]
+        }
+
+        model = {
+            c.name: tuple(c.columns.keys())
+            for c in table.constraints
+            if isinstance(c, UniqueConstraint) and c.name
+        }
+
+        # 1️⃣ Drop constraints that are missing OR different
+        for name, cols in existing.items():
+            if name not in model or model[name] != cols:
+                connection.execute(
+                    text(
+                        f'ALTER TABLE {fq_table} DROP CONSTRAINT "{name}"'
+                    )
+                )
+
+        # 2️⃣ Add constraints that are missing OR replaced
+        for name, cols in model.items():
+            if name not in existing or existing.get(name) != cols:
                 col_str = ", ".join(f'"{c}"' for c in cols)
-                connection.execute(text(f'ALTER TABLE "{table_name}" ADD CONSTRAINT "{name}" UNIQUE ({col_str})'))
-
+                connection.execute(
+                    text(
+                        f'ALTER TABLE {fq_table} '
+                        f'ADD CONSTRAINT "{name}" UNIQUE ({col_str})'
+                    )
+                )
 
 def sync_check_constraints(connection, metadata):
     inspector = inspect(connection)
 
-    for table_name, table_obj in metadata.tables.items():
-        existing_checks = {c["name"]: c["sqltext"] for c in inspector.get_check_constraints(table_name)}
-        model_checks = {c.name: str(c.sqltext) for c in table_obj.constraints if hasattr(c, "sqltext")}
+    for table in metadata.tables.values():
+        table_name = table.name
+        schema = table.schema
 
-        for name in existing_checks.keys() - model_checks.keys():
-            print(f"Dropping check constraint {name} on {table_name}")
-            connection.execute(text(f'ALTER TABLE "{table_name}" DROP CONSTRAINT "{name}"'))
-
-        for name, sqltext in model_checks.items():
-            if name not in existing_checks:
-                print(f"Adding check constraint {name} on {table_name}")
-                connection.execute(text(f'ALTER TABLE "{table_name}" ADD CONSTRAINT "{name}" CHECK ({sqltext})'))
-
-def sync_sequence(connection, table_name, column_name):
-    """
-    Ensure the sequence for an identity column exists and is owned by the column.
-    Idempotent; safe to run multiple times.
-    """
-    seq_name_query = text("""
-        SELECT pg_get_serial_sequence(:table, :column) AS seq_name
-    """)
-    seq_name = connection.execute(seq_name_query, {"table": table_name, "column": column_name}).scalar()
-
-    if seq_name is None:
-        # Sequence does not exist; create identity on column
-        print(f"Creating identity sequence for {table_name}.{column_name}")
-        connection.execute(
-            text(f'ALTER TABLE "{table_name}" ALTER COLUMN "{column_name}" ADD GENERATED BY DEFAULT AS IDENTITY')
+        fq_table = (
+            f'"{schema}"."{table_name}"'
+            if schema else f'"{table_name}"'
         )
-    else:
-        # Ensure ownership is correct
+
+        # Existing checks in DB
+        existing = {
+            c["name"]: c["sqltext"]
+            for c in inspector.get_check_constraints(table_name, schema=schema)
+            if c.get("name")
+        }
+
+        # Model checks
+        model = {
+            c.name: str(c.sqltext)
+            for c in table.constraints
+            if getattr(c, "sqltext", None) is not None and c.name
+        }
+
+        # Drop checks that are missing or changed
+        for name, sqltext in existing.items():
+            if name not in model or model[name] != sqltext:
+                print(f"Dropping check constraint {name} on {fq_table}")
+                connection.execute(
+                    text(
+                        f'ALTER TABLE {fq_table} DROP CONSTRAINT "{name}"'
+                    )
+                )
+
+        # Add checks that are missing or replaced
+        for name, sqltext in model.items():
+            if name not in existing or existing.get(name) != sqltext:
+                print(f"Adding check constraint {name} on {fq_table}")
+                connection.execute(
+                    text(
+                        f'ALTER TABLE {fq_table} '
+                        f'ADD CONSTRAINT "{name}" CHECK ({sqltext})'
+                    )
+                )
+
+def sync_sequence(connection, table, column):
+    """
+    Ensure the sequence for a SERIAL or IDENTITY column exists and
+    is owned by the column. PostgreSQL-safe and idempotent.
+    """
+
+    table_name = table.name
+    schema = table.schema
+
+    fq_table = (
+        f'"{schema}"."{table_name}"'
+        if schema else f'"{table_name}"'
+    )
+
+    # 1️⃣ Check identity status
+    identity = connection.execute(
+        text(
+            """
+            SELECT is_identity
+            FROM information_schema.columns
+            WHERE table_name = :table
+              AND column_name = :column
+              AND (:schema IS NULL OR table_schema = :schema)
+            """
+        ),
+        {
+            "table": table_name,
+            "column": column,
+            "schema": schema,
+        },
+    ).scalar()
+
+    # 2️⃣ Find sequence (works for SERIAL)
+    seq_name = connection.execute(
+        text(
+            """
+            SELECT pg_get_serial_sequence(
+                :fq_table, :column
+            )
+            """
+        ),
+        {
+            "fq_table": f"{schema}.{table_name}" if schema else table_name,
+            "column": column,
+        },
+    ).scalar()
+
+    # 3️⃣ If neither IDENTITY nor SERIAL → create identity
+    if identity != "YES" and seq_name is None:
+        print(f"Creating identity for {fq_table}.{column}")
+
+        # Drop default if present (SERIAL leftovers)
         connection.execute(
-            text(f'ALTER SEQUENCE "{seq_name}" OWNED BY "{table_name}"."{column_name}"')
+            text(
+                f'ALTER TABLE {fq_table} '
+                f'ALTER COLUMN "{column}" DROP DEFAULT'
+            )
+        )
+
+        connection.execute(
+            text(
+                f'ALTER TABLE {fq_table} '
+                f'ALTER COLUMN "{column}" '
+                f'ADD GENERATED BY DEFAULT AS IDENTITY'
+            )
+        )
+        return
+
+    # 4️⃣ Ensure sequence ownership (SERIAL only)
+    if seq_name:
+        # seq_name is already schema-qualified, DO NOT quote it
+        connection.execute(
+            text(
+                f'ALTER SEQUENCE {seq_name} '
+                f'OWNED BY {fq_table}."{column}"'
+            )
         )
 
 

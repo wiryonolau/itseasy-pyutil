@@ -377,31 +377,57 @@ def sync_primary_keys(connection, metadata):
 
     for table_name, table_obj in metadata.tables.items():
         existing_pk = inspector.get_pk_constraint(table_name)
-        existing_pk_columns = set(existing_pk["constrained_columns"]) if existing_pk else set()
-        model_pk_columns = set(col.name for col in table_obj.primary_key.columns)
+        existing_pk_columns = (
+            tuple(existing_pk["constrained_columns"])
+            if existing_pk and existing_pk.get("constrained_columns")
+            else tuple()
+        )
+
+        model_pk_columns = tuple(col.name for col in table_obj.primary_key.columns)
 
         # PK already matches → skip
         if existing_pk_columns == model_pk_columns:
             continue
 
-        # Get auto-increment columns
         cols_info = inspector.get_columns(table_name)
-        auto_inc_cols = {col["name"] for col in cols_info if col.get("autoincrement") in (True, "auto")}
+        auto_inc_cols = {
+            col["name"]
+            for col in cols_info
+            if col.get("autoincrement") in (True, "auto")
+        }
 
         try:
-            if auto_inc_cols:
-                # Must drop/add PK in one step to avoid 1075
-                pk_cols = ", ".join(f"`{col}`" for col in model_pk_columns)
-                sql = f"ALTER TABLE `{table_name}` DROP PRIMARY KEY, ADD PRIMARY KEY ({pk_cols})"
+            # Safety: AUTO_INCREMENT must be part of PK
+            if auto_inc_cols and not auto_inc_cols.issubset(set(model_pk_columns)):
+                raise RuntimeError(
+                    f"AUTO_INCREMENT column(s) {auto_inc_cols} must be part of PRIMARY KEY "
+                    f"in table {table_name}"
+                )
+
+            if auto_inc_cols and model_pk_columns:
+                # Must do in one statement
+                pk_cols = ", ".join(f"`{c}`" for c in model_pk_columns)
+                sql = (
+                    f"ALTER TABLE `{table_name}` "
+                    f"DROP PRIMARY KEY, ADD PRIMARY KEY ({pk_cols})"
+                )
                 connection.execute(text(sql))
+
             else:
                 # Drop PK first
                 if existing_pk_columns:
-                    connection.execute(text(f"ALTER TABLE `{table_name}` DROP PRIMARY KEY"))
+                    connection.execute(
+                        text(f"ALTER TABLE `{table_name}` DROP PRIMARY KEY")
+                    )
+
                 # Add new PK
                 if model_pk_columns:
-                    pk_cols = ", ".join(f"`{col}`" for col in model_pk_columns)
-                    connection.execute(text(f"ALTER TABLE `{table_name}` ADD PRIMARY KEY ({pk_cols})"))
+                    pk_cols = ", ".join(f"`{c}`" for c in model_pk_columns)
+                    connection.execute(
+                        text(
+                            f"ALTER TABLE `{table_name}` ADD PRIMARY KEY ({pk_cols})"
+                        )
+                    )
 
             print(f"PK synced for table {table_name}")
 
@@ -410,21 +436,24 @@ def sync_primary_keys(connection, metadata):
             continue
 
 
+
 def sync_indexes(connection, metadata):
     inspector = inspect(connection)
 
     for table_name, table_obj in metadata.tables.items():
-        # get existing indexes
         existing_indexes = {
             idx["name"]: idx
             for idx in inspector.get_indexes(table_name)
+            if idx.get("name")
         }
 
         for idx in table_obj.indexes:
             name = idx.name
+            if not name:
+                continue
 
-            # SQLAlchemy Index → column names
-            defined_cols = [col.name for col in idx.columns]
+            model_cols = tuple(col.name for col in idx.columns)
+            model_unique = bool(idx.unique)
 
             existing = existing_indexes.get(name)
 
@@ -433,125 +462,242 @@ def sync_indexes(connection, metadata):
                 idx.create(connection)
                 continue
 
-            existing_cols = existing["column_names"]
+            existing_cols = tuple(existing["column_names"])
+            existing_unique = bool(existing.get("unique"))
 
-            # compare ordered list, not set
-            if existing_cols != defined_cols:
-                print(
-                    f"Rebuilding index {name} on {table_name} "
-                    f"(old: {existing_cols}, new: {defined_cols})"
-                )
-                # drop index safely
-                connection.execute(
-                    text(f"DROP INDEX `{name}` ON `{table_name}`")
-                )
-                # recreate
-                idx.create(connection)
+            if (existing_cols, existing_unique) == (model_cols, model_unique):
+                continue
 
+            print(
+                f"Rebuilding index {name} on {table_name} "
+                f"(cols: {existing_cols} → {model_cols}, "
+                f"unique: {existing_unique} → {model_unique})"
+            )
+
+            connection.execute(
+                text(f"DROP INDEX `{name}` ON `{table_name}`")
+            )
+            idx.create(connection)
+
+def normalize_fk_action(action):
+    """
+    Normalize MySQL-equivalent FK actions.
+
+    MySQL treats the following as identical:
+    - None
+    - NO ACTION
+    - RESTRICT
+    """
+    if not action:
+        return "RESTRICT"
+
+    action = action.upper()
+
+    if action in ("NO ACTION", "RESTRICT"):
+        return "RESTRICT"
+
+    return action
 
 def sync_foreign_keys(connection, metadata):
-    """Ensure foreign keys match the schema without dropping valid ones."""
     inspector = inspect(connection)
 
     for table_name, table_obj in metadata.tables.items():
         print(f"Checking foreign keys for table: {table_name}")
 
-        # Get existing foreign keys from the database
-        existing_foreign_keys = {
-            tuple(fk["constrained_columns"]): {
-                "referred_table": fk["referred_table"],
-                "referred_columns": tuple(fk["referred_columns"]),
-                "name": fk["name"],
-            }
-            for fk in inspector.get_foreign_keys(table_name)
-        }
+        # ---------- existing FKs ----------
+        existing_fks = {}
+        for fk in inspector.get_foreign_keys(table_name):
+            identity = (
+                tuple(fk["constrained_columns"]),
+                fk["referred_table"],
+                tuple(fk["referred_columns"]),
+                normalize_fk_action(
+                    fk.get("options", {}).get("ondelete")
+                ),
+                normalize_fk_action(
+                    fk.get("options", {}).get("onupdate")
+                ),
+            )
+            existing_fks[identity] = fk["name"]
 
-        # Get foreign keys from the model definition
-        model_foreign_keys = {}
+        # ---------- model FKs ----------
+        model_fks = {}
         for constraint in table_obj.constraints:
-            if isinstance(constraint, ForeignKeyConstraint):
-                columns = tuple(constraint.column_keys)
-                ref_table = constraint.elements[0].column.table.name
-                ref_columns = tuple(
-                    elem.column.name for elem in constraint.elements
+            if not isinstance(constraint, ForeignKeyConstraint):
+                continue
+
+            identity = (
+                tuple(constraint.column_keys),
+                constraint.elements[0].column.table.name,
+                tuple(elem.column.name for elem in constraint.elements),
+                normalize_fk_action(constraint.ondelete),
+                normalize_fk_action(constraint.onupdate),
+            )
+
+            model_fks[identity] = constraint.name
+
+            print(
+                f"  Model FK: {identity[0]} → "
+                f"{identity[1]}{identity[2]} "
+                f"ON DELETE {identity[3]} "
+                f"ON UPDATE {identity[4]}"
+            )
+
+        # ---------- drop obsolete ----------
+        for identity, fk_name in existing_fks.items():
+            if identity not in model_fks:
+                print(f"Dropping FK {fk_name} on {table_name}")
+                connection.execute(
+                    text(
+                        f"ALTER TABLE `{table_name}` "
+                        f"DROP FOREIGN KEY `{fk_name}`"
+                    )
                 )
-                model_foreign_keys[columns] = (ref_table, ref_columns)
 
-                print(
-                    f"  Found FK in model: {columns} → {ref_table}({ref_columns})"
-                )
+        # ---------- add missing ----------
+        for identity, fk_name in model_fks.items():
+            if identity in existing_fks:
+                continue
 
-        # Add missing foreign keys
-        for columns, (ref_table, ref_columns) in model_foreign_keys.items():
-            if columns not in existing_foreign_keys:
-                col_str = ", ".join(columns)
-                ref_col_str = ", ".join(ref_columns)
-                add_stmt = f"ALTER TABLE `{table_name}` ADD FOREIGN KEY ({col_str}) REFERENCES `{ref_table}`({ref_col_str})"
-                print(f"Adding missing foreign key: {add_stmt}")
+            cols, ref_table, ref_cols, ondelete, onupdate = identity
 
-                try:
-                    connection.execute(text(add_stmt))
-                except SQLAlchemyError as e:
-                    print(f"Error adding foreign key on {table_name}: {e}")
+            col_sql = ", ".join(f"`{c}`" for c in cols)
+            ref_col_sql = ", ".join(f"`{c}`" for c in ref_cols)
 
-        # Drop obsolete foreign keys
-        for columns, fk_info in existing_foreign_keys.items():
-            if columns not in model_foreign_keys:
-                fk_name = fk_info["name"]
-                drop_stmt = (
-                    f"ALTER TABLE `{table_name}` DROP FOREIGN KEY `{fk_name}`"
-                )
-                print(f"Dropping outdated foreign key: {drop_stmt}")
+            sql = (
+                f"ALTER TABLE `{table_name}` "
+                f"ADD CONSTRAINT `{fk_name}` "
+                f"FOREIGN KEY ({col_sql}) "
+                f"REFERENCES `{ref_table}` ({ref_col_sql})"
+            )
 
-                try:
-                    connection.execute(text(drop_stmt))
-                except SQLAlchemyError as e:
-                    print(f"Error dropping foreign key on {table_name}: {e}")
+            # Only emit clauses if non-default
+            if ondelete != "RESTRICT":
+                sql += f" ON DELETE {ondelete}"
+            if onupdate != "RESTRICT":
+                sql += f" ON UPDATE {onupdate}"
+
+            print(f"Adding FK: {sql}")
+            connection.execute(text(sql))
 
 
 def sync_unique_constraints(connection, metadata):
-    """Ensure unique constraints match the schema."""
     inspector = inspect(connection)
 
     for table_name, table_obj in metadata.tables.items():
-        existing_unique_constraints = {
-            constraint["name"]: set(constraint["column_names"])
-            for constraint in inspector.get_unique_constraints(table_name)
-        }
 
-        model_unique_constraints = {
-            constraint.name: set(constraint.columns.keys())
-            for constraint in table_obj.constraints
-            if isinstance(constraint, UniqueConstraint) and constraint.name
-        }
+        # ---- existing unique constraints ----
+        existing_uniques = {}
+        for uc in inspector.get_unique_constraints(table_name):
+            if not uc.get("column_names"):
+                continue
 
-        # Drop unique constraints not in model
-        for constraint_name in (
-            existing_unique_constraints.keys() - model_unique_constraints.keys()
-        ):
-            drop_stmt = (
-                f"ALTER TABLE `{table_name}` DROP INDEX `{constraint_name}`"
-            )
-            print(f"Dropping unique constraint: {drop_stmt}")
-            try:
-                connection.execute(text(drop_stmt))
-            except SQLAlchemyError as e:
-                print(
-                    f"Error dropping unique constraint {constraint_name} on {table_name}: {e}"
+            identity = tuple(uc["column_names"])  # ORDERED tuple
+            existing_uniques[identity] = uc["name"]
+
+        # ---- model unique constraints ----
+        model_uniques = {}
+        for c in table_obj.constraints:
+            if not isinstance(c, UniqueConstraint):
+                continue
+            if not c.columns:
+                continue
+
+            identity = tuple(c.columns.keys())  # ORDERED tuple
+
+            if not c.name:
+                raise RuntimeError(
+                    f"UniqueConstraint on {table_name}{identity} must be named"
                 )
 
-        # Add missing unique constraints
-        for constraint_name, columns in model_unique_constraints.items():
-            if constraint_name not in existing_unique_constraints:
-                add_stmt = f"ALTER TABLE `{table_name}` ADD CONSTRAINT `{constraint_name}` UNIQUE ({', '.join(columns)})"
-                print(f"Adding unique constraint: {add_stmt}")
-                try:
-                    connection.execute(text(add_stmt))
-                except SQLAlchemyError as e:
-                    print(
-                        f"Error adding unique constraint {constraint_name} on {table_name}: {e}"
-                    )
+            model_uniques[identity] = c.name
 
+        # ---- drop obsolete or changed uniques ----
+        for identity, name in existing_uniques.items():
+            if identity not in model_uniques:
+                print(f"Dropping unique constraint {name} on {table_name}")
+                connection.execute(
+                    text(
+                        f"ALTER TABLE `{table_name}` "
+                        f"DROP INDEX `{name}`"
+                    )
+                )
+
+        # ---- add missing uniques ----
+        for identity, name in model_uniques.items():
+            if identity in existing_uniques:
+                continue
+
+            cols_sql = ", ".join(f"`{c}`" for c in identity)
+            sql = (
+                f"ALTER TABLE `{table_name}` "
+                f"ADD UNIQUE INDEX `{name}` ({cols_sql})"
+            )
+
+            print(f"Adding unique constraint {name} on {table_name}")
+            connection.execute(text(sql))
+
+def sync_check_constraints(connection, metadata):
+    inspector = inspect(connection)
+
+    # ---- detect engine ----
+    version = connection.execute(text("SELECT VERSION()")).scalar()
+    is_mariadb = "mariadb" in version.lower()
+
+    if is_mariadb:
+        print("Skipping CHECK constraints (MariaDB ignores them)")
+        return
+
+    for table_name, table_obj in metadata.tables.items():
+        print(f"Checking CHECK constraints for table: {table_name}")
+
+        # ---- existing CHECK constraints ----
+        existing_checks = {}
+        for c in inspector.get_check_constraints(table_name):
+            if not c.get("name"):
+                continue
+
+            identity = (c["name"], c["sqltext"])
+            existing_checks[identity] = c["name"]
+
+        # ---- model CHECK constraints ----
+        model_checks = {}
+        for c in table_obj.constraints:
+            if not hasattr(c, "sqltext"):
+                continue
+            if not c.name:
+                raise RuntimeError(
+                    f"CHECK constraint on {table_name} must be named"
+                )
+
+            identity = (c.name, str(c.sqltext))
+            model_checks[identity] = c.name
+
+        # ---- drop obsolete / changed CHECKs ----
+        for identity, name in existing_checks.items():
+            if identity not in model_checks:
+                print(f"Dropping CHECK constraint {name} on {table_name}")
+                connection.execute(
+                    text(
+                        f"ALTER TABLE `{table_name}` "
+                        f"DROP CHECK `{name}`"
+                    )
+                )
+
+        # ---- add missing CHECKs ----
+        for identity, name in model_checks.items():
+            if identity in existing_checks:
+                continue
+
+            _, sqltext = identity
+            sql = (
+                f"ALTER TABLE `{table_name}` "
+                f"ADD CONSTRAINT `{name}` CHECK ({sqltext})"
+            )
+
+            print(f"Adding CHECK constraint {name} on {table_name}")
+            connection.execute(text(sql))
+   
 
 def sync_schema(engine, metadata):
     """Ensure schema consistency."""
@@ -575,5 +721,7 @@ def sync_schema(engine, metadata):
         sync_indexes(conn, metadata)
         sync_foreign_keys(conn, metadata)
         sync_unique_constraints(conn, metadata)
+        sync_check_constraints(conn, metadata)
+    
 
         conn.execute(text("SET FOREIGN_KEY_CHECKS = 1"))
