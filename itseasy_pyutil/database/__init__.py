@@ -1,10 +1,12 @@
 import abc
+import json
 import re
 import sys
 import traceback
 from collections import namedtuple
 from contextlib import asynccontextmanager
-from typing import NamedTuple, Optional
+from datetime import date, datetime, timezone
+from typing import Any, NamedTuple, Optional
 
 from itseasy_pyutil import get_logger, list_get
 
@@ -81,7 +83,8 @@ class Expression:
 
 class Condition(NamedTuple):
     column: str
-    value: str
+    # asyncpg compatibility
+    value: Any
     glue: str = "AND"
     opr: str = "="
 
@@ -152,21 +155,26 @@ class AbstractDatabase(abc.ABC):
 
         return identifier
 
-    def filter_to_conditions(self, filters=[], mapping={}):
+    def filter_to_conditions(self, filters=[], mapping={}, column_types={}):
         """
-        Convert filter from front end to condition, beware of sql injection
+        Convert frontend filters to Condition objects.
+
+        Args:
+            filters: list of dicts from frontend
+            mapping: dict mapping frontend field id → DB column
+            column_types: dict mapping column_name → type (e.g., 'int', 'bool', 'timestamp', 'timestamptz', 'json')
         """
         conditions = []
 
         for f in filters:
             try:
                 obj = Filter(**f)
-
                 opr = obj.opr
-                value = obj.value
+                value: Any = obj.value
 
+                # Map frontend operators to SQL operators
                 if obj.opr in ["=", ">", "<", ">=", "<="]:
-                    opr = obj.opr
+                    pass
                 elif obj.opr == "eq":
                     opr = "="
                 elif obj.opr == "neq":
@@ -182,12 +190,13 @@ class AbstractDatabase(abc.ABC):
                 elif obj.opr == "contain":
                     opr = "LIKE"
                     value = f"%{value}%"
-                elif obj.opr == "includes":
-                    opr = "IN"
-                    value = value.split(",")
                 elif obj.opr == "startswith":
                     opr = "LIKE"
                     value = f"{value}%"
+                elif obj.opr == "includes":
+                    opr = "IN"
+                    if isinstance(value, str):
+                        value = [v.strip() for v in value.split(",")]
                 elif obj.opr == "empty":
                     opr = "IS"
                     value = None
@@ -197,30 +206,75 @@ class AbstractDatabase(abc.ABC):
                 else:
                     continue
 
-                if not len(str(value)):
+                # Skip empty strings (except None)
+                if (
+                    value is not None
+                    and isinstance(value, str)
+                    and not value.strip()
+                ):
                     continue
 
-                column = mapping.get(obj.id, obj.id)
+                # Convert value based on column type
+                col_type = column_types.get(obj.id)
+                if col_type and value is not None:
+                    if col_type in ("timestamp", "timestamptz"):
+                        dt = (
+                            datetime.fromisoformat(value)
+                            if isinstance(value, str)
+                            else value
+                        )
+                        if col_type == "timestamptz" and dt.tzinfo is None:
+                            dt = dt.replace(tzinfo=timezone.utc)
+                        value = dt
+                    elif col_type == "date":
+                        value = (
+                            datetime.fromisoformat(value).date()
+                            if isinstance(value, str)
+                            else value
+                        )
+                    elif col_type == "bool":
+                        if isinstance(value, str):
+                            value = value.lower() == "true"
+                    elif col_type == "int":
+                        value = int(value) if isinstance(value, str) else value
+                    elif col_type == "float":
+                        value = (
+                            float(value) if isinstance(value, str) else value
+                        )
+                    elif col_type in ("json", "jsonb"):
+                        if isinstance(value, str):
+                            value = json.loads(value)
 
+                column = mapping.get(obj.id, obj.id)
                 conditions.append(
                     Condition(column=column, value=value, opr=opr)
                 )
-            except:
+            except Exception:
+                self._logger.debug(sys.exc_info())
                 continue
+
         return conditions
 
     def get_sql_string(self, sql: str, values=[]):
+        """
+        Return SQL string with parameters interpolated for logging/debugging.
+        Supports both %s and $1, $2… placeholders.
+        """
         # Step 1: Clean SQL (remove empty lines, extra spaces)
         lines = [line.strip() for line in sql.splitlines() if line.strip()]
         cleaned_sql = re.sub(r"\s+", " ", " ".join(lines)).strip()
 
-        if len(values):
+        if not values:
+            return cleaned_sql
+
+        # Detect placeholder style
+        if "%s" in cleaned_sql:
+            # MySQL-style
             parts = cleaned_sql.split("%s")
             if len(parts) - 1 != len(values):
                 raise ValueError(
                     "Number of placeholders (%s) and values do not match."
                 )
-
             result = parts[0]
             for i in range(len(values)):
                 val = values[i]
@@ -233,13 +287,41 @@ class AbstractDatabase(abc.ABC):
                 elif val is None:
                     formatted_val = "NULL"
                 else:
-                    escaped = str(val).replace(
-                        "'", "''"
-                    )  # Escape single quotes
+                    escaped = str(val).replace("'", "''")
                     formatted_val = f"'{escaped}'"
                 result += formatted_val + parts[i + 1]
             return result
+
+        elif re.search(r"\$\d+", cleaned_sql):
+            # PostgreSQL-style $1, $2… placeholders
+            result = cleaned_sql
+            # Sort placeholders descending so we replace $10 before $1
+            placeholders = sorted(
+                set(re.findall(r"\$(\d+)", cleaned_sql)), key=int, reverse=True
+            )
+            for ph in placeholders:
+                idx = int(ph) - 1
+                if idx >= len(values):
+                    raise ValueError(
+                        f"Placeholder ${ph} has no corresponding value."
+                    )
+                val = values[idx]
+                if isinstance(val, bool):
+                    formatted_val = str(int(val))
+                elif isinstance(val, int):
+                    formatted_val = str(val)
+                elif isinstance(val, bytes):
+                    formatted_val = val.hex()
+                elif val is None:
+                    formatted_val = "NULL"
+                else:
+                    escaped = str(val).replace("'", "''")
+                    formatted_val = f"'{escaped}'"
+                # Replace all occurrences of this placeholder
+                result = re.sub(rf"\${ph}\b", formatted_val, result)
+            return result
         else:
+            # No recognized placeholders
             return cleaned_sql
 
     def parse_joins(self, joins=[]):
