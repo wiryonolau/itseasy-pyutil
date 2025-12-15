@@ -21,9 +21,21 @@ from itseasy_pyutil.database import (
 
 class Database(AbstractDatabase):
     def _prepare(self, sql, params):
-        sql = pg_placeholders(sql)
         if self._as_dev:
             self._logger.debug(self.get_sql_string(sql, params))
+
+        """
+        Convert MySQL-style %s placeholders to asyncpg-style $1, $2...
+        Only for asyncpg; leaves actual parameters untouched.
+        """
+
+        if "%s" in sql:
+            parts = sql.split("%s")
+            sql = (
+                "".join(f"{part}${i+1}" for i, part in enumerate(parts[:-1]))
+                + parts[-1]
+            )
+
         return sql, params
 
     async def connect(self):
@@ -152,15 +164,11 @@ class Database(AbstractDatabase):
             {conditions_stmt}
             {"ORDER BY" if len(orders) else ""}
             {",".join(orders)}
-            LIMIT $%s OFFSET $%s
+            LIMIT %s OFFSET %s
         """
 
-        # Prepare values for asyncpg ($1, $2, ...)
         all_params = join_params + conditions_params + [limit, offset]
         sql, params = self._prepare(query, all_params)
-
-        if self._as_dev:
-            self._logger.debug(self.get_sql_string(sql, params))
 
         async with self._pool.acquire() as conn:
             return await conn.fetch(sql, *params)
@@ -179,17 +187,11 @@ class Database(AbstractDatabase):
         all_params = join_params + conditions_params
         sql, params = self._prepare(query, all_params)
 
-        if self._as_dev:
-            self._logger.debug(self.get_sql_string(sql, params))
-
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(sql, *params)
             return row["total"] if row else 0
 
     async def execute(self, query, params=(), return_result: bool = False):
-        if self._as_dev:
-            self._logger.debug(self.get_sql_string(query, params))
-
         try:
             async with self._pool.acquire() as conn:
                 if return_result:
@@ -199,6 +201,7 @@ class Database(AbstractDatabase):
                     tr = conn.transaction()
                     await tr.start()
                     try:
+                        query, params = self._prepare(query, params)
                         result = await conn.execute(query, *params)
                         await tr.commit()
                         return Response(
@@ -230,8 +233,7 @@ class Database(AbstractDatabase):
                     else:
                         continue
 
-                    if self._as_dev:
-                        self._logger.debug(self.get_sql_string(query, args))
+                    query, args = self._prepare(query, args)
 
                     result = await conn.execute(query, *args)
                     # asyncpg returns "INSERT 0 1" or "UPDATE 3" etc.
@@ -254,8 +256,7 @@ class Database(AbstractDatabase):
             {conditions_stmt}
         """
 
-        if self._as_dev:
-            self._logger.debug(self.get_sql_string(query, params))
+        query, params = self._prepare(query, params)
 
         async with self._pool.acquire() as conn:
             tr = conn.transaction()
@@ -297,9 +298,6 @@ class Database(AbstractDatabase):
                 """
 
                 sql, values = self._prepare(insert_stmt, values)
-
-                if self._as_dev:
-                    self._logger.debug(self.get_sql_string(sql, values))
 
                 row = await conn.fetchrow(sql, *values)
 
@@ -365,9 +363,6 @@ class Database(AbstractDatabase):
 
                 sql, values = self._prepare(update_stmt, update_values)
 
-                if self._as_dev:
-                    self._logger.debug(self.get_sql_string(sql, values))
-
                 row = await conn.fetchrow(sql, *values)
 
                 await tr.commit()  # COMMIT
@@ -423,9 +418,6 @@ class Database(AbstractDatabase):
                 """
 
                 sql, vals = self._prepare(insert_stmt, values)
-
-                if self._as_dev:
-                    self._logger.debug(self.get_sql_string(sql, vals))
 
                 row = await conn.fetchrow(sql, *vals)
                 await tr.commit()
