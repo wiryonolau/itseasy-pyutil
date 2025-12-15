@@ -1,5 +1,8 @@
+import re
+
 from sqlalchemy import (
     BigInteger,
+    DateTime,
     ForeignKeyConstraint,
     Integer,
     MetaData,
@@ -32,23 +35,45 @@ def normalize_default_value(default_value):
 
 # ---------- Normalize SQLAlchemy types ----------
 def normalize_sa_type(sa_type):
+    if sa_type is None:
+        return None
+
+    # Detect timezone if DateTime
+    if (
+        hasattr(sa_type, "timezone")
+        and sa_type.__class__.__name__.lower() == "datetime"
+    ):
+        if sa_type.timezone:
+            return "timestamp with time zone"
+        else:
+            return "timestamp without time zone"
+
+    t = str(sa_type).lower()
+    if "(" in t:
+        t = t.split("(")[0]
+
     mapping = {
-        "Integer": "integer",
-        "SmallInteger": "smallint",
-        "BigInteger": "bigint",
-        "Boolean": "boolean",
-        "String": "character varying",
-        "Text": "text",
-        "Float": "double precision",
-        "Numeric": "numeric",
-        "DateTime": "timestamp without time zone",
-        "Date": "date",
-        "Time": "time without time zone",
-        "JSON": "jsonb",
-        "LargeBinary": "bytea",
-        "Enum": "enum",
+        "integer": "integer",
+        "smallinteger": "smallint",
+        "biginteger": "bigint",
+        "boolean": "boolean",
+        "string": "character varying",
+        "varchar": "character varying",
+        "character varying": "character varying",
+        "text": "text",
+        "float": "double precision",
+        "numeric": "numeric",
+        "timestamp": "timestamp without time zone",
+        "date": "date",
+        "time": "time without time zone",
+        "json": "jsonb",
+        "jsonb": "jsonb",
+        "largebinary": "bytea",
+        "bytea": "bytea",
+        "enum": "enum",
     }
-    return mapping.get(sa_type, sa_type.lower())
+
+    return mapping.get(t, t)
 
 
 # ---------- Column inspection ----------
@@ -109,8 +134,14 @@ def column_has_update(existing, new):
     ) = new
 
     # ---------- Normalize types ----------
-    existing_type_norm = normalize_sa_type(str(existing_type).split("(")[0])
-    new_type_norm = normalize_sa_type(str(new_type).split("(")[0])
+    # Encode timezone into string for new_type if DateTime
+    existing_type_str = str(existing_type).lower()
+    new_type_str = str(new_type).lower()
+
+    # If you can detect timezone from the new_type string, append "with time zone" (or pass here if you already encoded)
+    # Otherwise leave as-is for backward compatibility
+    existing_type_norm = normalize_sa_type(existing_type_str)
+    new_type_norm = normalize_sa_type(new_type_str)
 
     # ---------- Normalize nullable ----------
     existing_nullable = bool(existing_nullable)
@@ -129,12 +160,16 @@ def column_has_update(existing, new):
     existing_default = normalize_default_value(existing_default)
     new_default = normalize_default_value(new_default)
 
+    # Normalize PostgreSQL defaults
+    type_cast_regex = re.compile(r"::\s*[a-zA-Z_ ]+")
     if existing_default is not None:
         existing_default = (
-            str(existing_default).split("::")[0].strip("'\"").lower()
+            type_cast_regex.sub("", str(existing_default)).strip("'\"").lower()
         )
     if new_default is not None:
-        new_default = str(new_default).split("::")[0].strip("'\"").lower()
+        new_default = (
+            type_cast_regex.sub("", str(new_default)).strip("'\"").lower()
+        )
 
     # ---------- Compare ----------
     if existing_nullable != new_nullable:
@@ -240,20 +275,108 @@ def sync_sequence(connection, table_name, column):
 # ---------- Modify column ----------
 def modify_column_if_needed(connection, table_name, column_name, column_obj):
     """
-    Create or modify a column in PostgreSQL.
-    Handles:
-      - Column creation if missing
-      - Enum types creation with default table_column_enum naming
-      - Adding missing enum values
-      - Type changes
-      - Nullable changes
-      - Defaults (booleans, strings, numerics, enums)
-      - Identity/autoincrement (only for integer primary keys)
-      - Idempotent
+    Decide whether to create or update a column.
     """
     existing_info = column_info(connection, table_name, column_name)
 
-    # Basic column info
+    if existing_info:
+        update_column_if_needed(
+            connection, table_name, column_name, column_obj, existing_info
+        )
+    else:
+        create_column_if_missing(
+            connection, table_name, column_name, column_obj
+        )
+
+
+def compute_column_type(column_obj):
+    """Return PostgreSQL type string including timezone if needed."""
+    col_type_name = type(column_obj.type).__name__
+    if col_type_name.lower() == "enum":
+        return None  # will handle enum separately
+    elif isinstance(column_obj.type, DateTime):
+        return (
+            "timestamp with time zone"
+            if getattr(column_obj.type, "timezone", False)
+            else "timestamp without time zone"
+        )
+    else:
+        return normalize_sa_type(col_type_name)
+
+
+def create_column_if_missing(connection, table_name, column_name, column_obj):
+    """
+    Create a new column in PostgreSQL, handling enums, identity, default, nullable.
+    """
+    new_col_type = compute_column_type(column_obj)
+    enum_class = None
+    enum_type_name = None
+
+    # Enum handling
+    if type(column_obj.type).__name__.lower() == "enum":
+        enum_class = getattr(column_obj.type, "enum_class")
+        enum_type_name = f"{table_name}_{column_name}_enum"
+        new_col_type = enum_type_name
+
+        escaped_values = [v.value.replace("'", "''") for v in enum_class]
+        enum_values_sql = ", ".join(f"'{v}'" for v in escaped_values)
+        sql = f"""
+        DO $$
+        BEGIN
+            IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = '{enum_type_name}') THEN
+                CREATE TYPE {enum_type_name} AS ENUM ({enum_values_sql});
+            END IF;
+        END
+        $$;
+        """
+        connection.execute(text(sql))
+
+    # Build type SQL
+    col_type_sql = new_col_type
+    if getattr(column_obj.type, "length", None):
+        col_type_sql += f"({column_obj.type.length})"
+    elif getattr(column_obj.type, "precision", None) and getattr(
+        column_obj.type, "scale", None
+    ):
+        col_type_sql += f"({column_obj.type.precision},{column_obj.type.scale})"
+
+    # Build ADD COLUMN statement
+    alter_stmt = (
+        f'ALTER TABLE "{table_name}" ADD COLUMN "{column_name}" {col_type_sql}'
+    )
+    if not column_obj.nullable:
+        alter_stmt += " NOT NULL"
+
+    default_val = normalize_default_value(
+        column_obj.default or column_obj.server_default
+    )
+    if default_val is not None:
+        alter_stmt += f" DEFAULT {default_val}"
+
+    # Identity for integer primary keys
+    if (
+        getattr(column_obj, "autoincrement", False)
+        and isinstance(column_obj.type, (Integer, BigInteger))
+        and getattr(column_obj, "primary_key", False)
+        and not column_obj.nullable
+    ):
+        alter_stmt += " GENERATED BY DEFAULT AS IDENTITY"
+
+    connection.execute(text(alter_stmt))
+
+    # Sync sequence if identity
+    if getattr(column_obj, "autoincrement", False):
+        sync_sequence(connection, table_name, column_name)
+
+
+def update_column_if_needed(
+    connection, table_name, column_name, column_obj, existing_info
+):
+    """
+    Update an existing column if type, default, nullable, identity, or enum values differ.
+    Only removes FKs if column changes.
+    """
+    new_col_type = compute_column_type(column_obj)
     new_type = type(column_obj.type).__name__
     new_nullable = "yes" if column_obj.nullable else "no"
     new_default = normalize_default_value(
@@ -262,17 +385,17 @@ def modify_column_if_needed(connection, table_name, column_name, column_obj):
     new_length = getattr(column_obj.type, "length", None)
     new_precision = getattr(column_obj.type, "precision", None)
     new_scale = getattr(column_obj.type, "scale", None)
-    new_is_identity = getattr(column_obj, "autoincrement", False)
+    new_is_identity = (
+        getattr(column_obj, "autoincrement", False)
+        and isinstance(column_obj.type, (Integer, BigInteger))
+        and getattr(column_obj, "primary_key", False)
+        and not column_obj.nullable
+    )
 
-    # Enum handling
     enum_class = None
-    enum_type_name = None
     if new_type.lower() == "enum":
         enum_class = getattr(column_obj.type, "enum_class")
-        enum_type_name = f"{table_name}_{column_name}_enum"
-
-    new_col_type = enum_type_name if enum_class else normalize_sa_type(new_type)
-    new_erratas = getattr(column_obj, "extra", None)
+        new_col_type = f"{table_name}_{column_name}_enum"
 
     new_info = (
         new_type,
@@ -282,171 +405,90 @@ def modify_column_if_needed(connection, table_name, column_name, column_obj):
         new_length,
         new_precision,
         new_scale,
-        new_erratas,
+        getattr(column_obj, "extra", None),
         new_is_identity,
     )
 
-    # COLUMN EXISTS: update
-    if existing_info:
-        if column_has_update(existing_info, new_info):
-            print(f"Updating column {table_name}.{column_name}")
-            remove_column_fk(connection, table_name, column_name)
+    if column_has_update(existing_info, new_info):
+        print(f"Updating column {table_name}.{column_name}")
 
-            # Add missing enum values
-            if enum_class:
-                existing_vals = connection.execute(
-                    text(
-                        "SELECT enumlabel FROM pg_enum "
-                        "JOIN pg_type ON pg_enum.enumtypid = pg_type.oid "
-                        "WHERE typname=:name ORDER BY enumsortorder"
-                    ),
-                    {"name": enum_type_name},
-                ).fetchall()
-                existing_vals = [v[0] for v in existing_vals]
-                for val in enum_class:
-                    if val.value not in existing_vals:
-                        connection.execute(
-                            text(
-                                f"ALTER TYPE \"{enum_type_name}\" ADD VALUE IF NOT EXISTS '{val.value}'"
-                            )
-                        )
-
-            # Drop identity if type changed
-            if existing_info[8] and existing_info[1] != new_col_type:
-                connection.execute(
-                    text(
-                        f'ALTER TABLE "{table_name}" ALTER COLUMN "{column_name}" DROP IDENTITY IF EXISTS'
-                    )
-                )
-
-            # ALTER TYPE
-            col_type_sql = new_col_type
-            if new_length:
-                col_type_sql += f"({new_length})"
-            elif new_precision and new_scale:
-                col_type_sql += f"({new_precision},{new_scale})"
-
-            connection.execute(
-                text(
-                    f'ALTER TABLE "{table_name}" ALTER COLUMN "{column_name}" TYPE {col_type_sql} USING "{column_name}"::{col_type_sql}'
-                )
-            )
-
-            # ALTER nullability
-            if existing_info[2] != new_nullable:
-                action = (
-                    "DROP NOT NULL" if new_nullable == "yes" else "SET NOT NULL"
-                )
-                connection.execute(
-                    text(
-                        f'ALTER TABLE "{table_name}" ALTER COLUMN "{column_name}" {action}'
-                    )
-                )
-
-            # ALTER default
-            if existing_info[3] != new_default:
-                if new_default is None:
-                    connection.execute(
-                        text(
-                            f'ALTER TABLE "{table_name}" ALTER COLUMN "{column_name}" DROP DEFAULT'
-                        )
-                    )
-                else:
-                    default_val = (
-                        new_default
-                        if isinstance(new_default, str)
-                        else str(new_default)
-                    )
-                    connection.execute(
-                        text(
-                            f'ALTER TABLE "{table_name}" ALTER COLUMN "{column_name}" SET DEFAULT {default_val}'
-                        )
-                    )
-
-            # ALTER identity (only integer primary keys)
-            if (
-                new_is_identity
-                and isinstance(column_obj.type, (Integer, BigInteger))
-                and getattr(column_obj, "primary_key", False)
-                and not column_obj.nullable
-            ):
-                if not existing_info[8]:
-                    connection.execute(
-                        text(
-                            f'ALTER TABLE "{table_name}" ALTER COLUMN "{column_name}" ADD GENERATED BY DEFAULT AS IDENTITY'
-                        )
-                    )
-                    sync_sequence(connection, table_name, column_name)
-            elif existing_info[8] and not new_is_identity:
-                connection.execute(
-                    text(
-                        f'ALTER TABLE "{table_name}" ALTER COLUMN "{column_name}" DROP IDENTITY IF EXISTS'
-                    )
-                )
-
-        else:
-            print(f"Skipping {table_name}.{column_name}: no changes detected.")
-            return
-
-    # COLUMN DOES NOT EXIST: create
-    else:
-        print(
-            f"Column {column_name} does not exist in {table_name}. Creating column."
-        )
+        # Remove FKs only when there is an actual change
         remove_column_fk(connection, table_name, column_name)
 
-        # CREATE ENUM TYPE if needed
+        # Enums: add missing values
         if enum_class:
-            escaped_values = [v.value.replace("'", "''") for v in enum_class]
-            enum_values_sql = ", ".join(f"'{v}'" for v in escaped_values)
-            sql = f"""
-            DO $$
-            BEGIN
-                IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = '{enum_type_name}') THEN
-                    CREATE TYPE {enum_type_name} AS ENUM ({enum_values_sql});
-                END IF;
-            END
-            $$;
-            """
-            connection.execute(text(sql))
+            existing_vals = connection.execute(
+                text(
+                    "SELECT enumlabel FROM pg_enum "
+                    "JOIN pg_type ON pg_enum.enumtypid = pg_type.oid "
+                    "WHERE typname=:name ORDER BY enumsortorder"
+                ),
+                {"name": new_col_type},
+            ).fetchall()
+            existing_vals = [v[0] for v in existing_vals]
+            for val in enum_class:
+                if val.value not in existing_vals:
+                    connection.execute(
+                        text(
+                            f"ALTER TYPE \"{new_col_type}\" ADD VALUE IF NOT EXISTS '{val.value}'"
+                        )
+                    )
 
-        # Column type
+        # ALTER TYPE
         col_type_sql = new_col_type
         if new_length:
             col_type_sql += f"({new_length})"
         elif new_precision and new_scale:
             col_type_sql += f"({new_precision},{new_scale})"
 
-        # Build ADD COLUMN statement
-        alter_stmt = f'ALTER TABLE "{table_name}" ADD COLUMN "{column_name}" {col_type_sql}'
-        if not column_obj.nullable:
-            alter_stmt += " NOT NULL"
-        if new_default is not None:
-            default_val = (
-                new_default
-                if isinstance(new_default, str)
-                else str(new_default)
+        connection.execute(
+            text(
+                f'ALTER TABLE "{table_name}" ALTER COLUMN "{column_name}" TYPE {col_type_sql} USING "{column_name}"::{col_type_sql}'
             )
-            alter_stmt += f" DEFAULT {default_val}"
+        )
 
-        # Only add identity for integer primary keys
-        if (
-            new_is_identity
-            and isinstance(column_obj.type, (Integer, BigInteger))
-            and getattr(column_obj, "primary_key", False)
-            and not column_obj.nullable
-        ):
-            alter_stmt += " GENERATED BY DEFAULT AS IDENTITY"
+        # ALTER nullable
+        if existing_info[2] != new_nullable:
+            action = (
+                "DROP NOT NULL" if new_nullable == "yes" else "SET NOT NULL"
+            )
+            connection.execute(
+                text(
+                    f'ALTER TABLE "{table_name}" ALTER COLUMN "{column_name}" {action}'
+                )
+            )
 
-        connection.execute(text(alter_stmt))
+        # ALTER default
+        if existing_info[3] != new_default:
+            if new_default is None:
+                connection.execute(
+                    text(
+                        f'ALTER TABLE "{table_name}" ALTER COLUMN "{column_name}" DROP DEFAULT'
+                    )
+                )
+            else:
+                connection.execute(
+                    text(
+                        f'ALTER TABLE "{table_name}" ALTER COLUMN "{column_name}" SET DEFAULT {new_default}'
+                    )
+                )
 
-        if (
-            new_is_identity
-            and isinstance(column_obj.type, (Integer, BigInteger))
-            and getattr(column_obj, "primary_key", False)
-            and not column_obj.nullable
-        ):
+        # ALTER identity
+        if new_is_identity and not existing_info[8]:
+            connection.execute(
+                text(
+                    f'ALTER TABLE "{table_name}" ALTER COLUMN "{column_name}" ADD GENERATED BY DEFAULT AS IDENTITY'
+                )
+            )
             sync_sequence(connection, table_name, column_name)
+        elif existing_info[8] and not new_is_identity:
+            connection.execute(
+                text(
+                    f'ALTER TABLE "{table_name}" ALTER COLUMN "{column_name}" DROP IDENTITY IF EXISTS'
+                )
+            )
+    else:
+        print(f"Skipping {table_name}.{column_name}: no changes detected.")
 
 
 # ---------- Remove old tables/columns ----------
@@ -486,99 +528,169 @@ def remove_old_columns(connection, metadata):
 # ---------- Sync PK, indexes, FKs, unique, check ----------
 def sync_primary_keys(connection, metadata):
     inspector = inspect(connection)
+
     for table in metadata.tables.values():
         table_name = table.name
 
-        existing_pk = inspector.get_pk_constraint(table_name)
-        existing_pk_columns = (
-            tuple(existing_pk["constrained_columns"]) if existing_pk else ()
-        )
-        model_pk_columns = tuple(col.name for col in table.primary_key.columns)
-        if existing_pk_columns != model_pk_columns:
-            if existing_pk and existing_pk.get("name"):
-                connection.execute(
-                    text(
-                        f'ALTER TABLE {table_name} DROP CONSTRAINT "{existing_pk["name"]}"'
-                    )
-                )
-            if model_pk_columns:
-                cols_sql = ", ".join(f'"{c}"' for c in model_pk_columns)
-                connection.execute(
-                    text(
-                        f"ALTER TABLE {table_name} ADD PRIMARY KEY ({cols_sql})"
-                    )
-                )
+        existing = inspector.get_pk_constraint(table_name) or {}
+        existing_cols = tuple(existing.get("constrained_columns") or ())
+        existing_name = existing.get("name")
+
+        model_cols = tuple(col.name for col in table.primary_key.columns)
+
+        if existing_cols == model_cols:
+            print(f"[PK][NOOP] {table_name}")
+            continue
+
+        if existing_cols and existing_name:
+            sql = (
+                f'ALTER TABLE "{table_name}" DROP CONSTRAINT "{existing_name}"'
+            )
+            print(f"[PK][DROP] {sql}")
+            connection.execute(text(sql))
+
+        if model_cols:
+            cols_sql = ", ".join(f'"{c}"' for c in model_cols)
+            sql = f'ALTER TABLE "{table_name}" ADD PRIMARY KEY ({cols_sql})'
+            print(f"[PK][ADD] {sql}")
+            connection.execute(text(sql))
 
 
 def sync_indexes(connection, metadata):
     inspector = inspect(connection)
+
     for table in metadata.tables.values():
         table_name = table.name
 
-        existing_indexes = {
-            idx["name"]: idx for idx in inspector.get_indexes(table_name)
-        }
-        for idx in table.indexes:
-            name = idx.name
-            model_cols = tuple(col.name for col in idx.columns)
-            model_unique = idx.unique
-            existing = existing_indexes.get(name)
-            if (
-                existing
-                and tuple(existing["column_names"]) == model_cols
-                and bool(existing.get("unique")) == bool(model_unique)
-            ):
-                continue
-            if existing:
-                connection.execute(text(f'DROP INDEX "{name}"'))
-            cols_sql = ", ".join(f'"{c}"' for c in model_cols)
-            unique_sql = "UNIQUE " if model_unique else ""
-            connection.execute(
-                text(
-                    f'CREATE {unique_sql}INDEX "{name}" ON {table_name} ({cols_sql})'
-                )
+        # Explicit Index() objects only
+        model = {
+            idx.name: (
+                tuple(col.name for col in idx.columns),
+                bool(idx.unique),
             )
-
-
-def sync_foreign_keys(connection, metadata):
-    inspector = inspect(connection)
-    for table in metadata.tables.values():
-        table_name = table.name
+            for idx in table.indexes
+            if idx.name
+        }
 
         existing = {
-            tuple(fk["constrained_columns"]): fk
-            for fk in inspector.get_foreign_keys(table_name)
+            idx["name"]: (
+                tuple(idx["column_names"]),
+                bool(idx.get("unique")),
+            )
+            for idx in inspector.get_indexes(table_name)
+            if idx.get("name")
         }
-        model = {}
-        for constraint in table.constraints:
-            if isinstance(constraint, ForeignKeyConstraint):
-                local_cols = tuple(constraint.column_keys)
-                ref_table = constraint.elements[0].column.table.name
-                ref_cols = tuple(e.column.name for e in constraint.elements)
-                model[local_cols] = (ref_table, ref_cols, constraint.name)
-        # Drop missing FKs
-        for cols, fk in existing.items():
-            if cols not in model:
-                connection.execute(
-                    text(
-                        f'ALTER TABLE {table_name} DROP CONSTRAINT "{fk["name"]}"'
-                    )
+
+        changed = False
+
+        for name, (cols, unique) in model.items():
+            if name in existing and existing[name] == (cols, unique):
+                continue
+
+            changed = True
+
+            if name in existing:
+                sql = f'DROP INDEX "{name}"'
+                print(f"[INDEX][DROP] {sql}")
+                connection.execute(text(sql))
+
+            cols_sql = ", ".join(f'"{c}"' for c in cols)
+            unique_sql = "UNIQUE " if unique else ""
+            sql = (
+                f'CREATE {unique_sql}INDEX "{name}" '
+                f'ON "{table_name}" ({cols_sql})'
+            )
+            print(f"[INDEX][CREATE] {sql}")
+            connection.execute(text(sql))
+
+        if not changed:
+            print(f"[INDEX][NOOP] {table_name}")
+
+
+def get_existing_fks(connection, table_name, schema="public"):
+    """
+    Return dict mapping constrained columns tuple -> FK constraint name.
+    Works reliably for lower-case table/column names in PostgreSQL.
+    """
+    sql = text(
+        """
+        SELECT
+            con.conname AS constraint_name,
+            array_agg(att.attname ORDER BY att.attnum) AS constrained_columns
+        FROM
+            pg_constraint con
+            JOIN pg_class rel ON rel.oid = con.conrelid
+            JOIN pg_namespace nsp ON nsp.oid = rel.relnamespace
+            JOIN unnest(con.conkey) AS attnum(attnum) ON TRUE
+            JOIN pg_attribute att
+              ON att.attrelid = rel.oid AND att.attnum = attnum.attnum
+        WHERE
+            con.contype = 'f'
+            AND nsp.nspname = :schema
+            AND rel.relname = :table
+        GROUP BY con.conname
+        """
+    )
+    result = (
+        connection.execute(sql, {"schema": schema, "table": table_name})
+        .mappings()
+        .all()
+    )
+    fks = {}
+    for row in result:
+        fks[tuple(row["constrained_columns"])] = row["constraint_name"]
+    return fks
+
+
+def sync_foreign_keys(connection, metadata, schema="public"):
+    """
+    Synchronize foreign keys between SQLAlchemy metadata and PostgreSQL database.
+    """
+    for table in metadata.tables.values():
+        table_name = table.name
+
+        # Fetch existing FKs
+        existing_fks_map = get_existing_fks(
+            connection, table_name, schema=schema
+        )
+        print(f"[FK][EXISTING] {table_name}: {existing_fks_map}")
+
+        # Extract model FKs
+        model_fks_map = {}
+        for c in table.constraints:
+            if isinstance(c, ForeignKeyConstraint):
+                cols = tuple(c.column_keys)
+                ref_table = c.elements[0].column.table.name
+                ref_cols = tuple(e.column.name for e in c.elements)
+                model_fks_map[cols] = (ref_table, ref_cols, c.name)
+
+        # DROP FKs not in metadata
+        for cols, fk_name in existing_fks_map.items():
+            if cols not in model_fks_map:
+                sql = f'ALTER TABLE "{schema}"."{table_name}" DROP CONSTRAINT "{fk_name}"'
+                print(f"[FK][DROP] {sql}")
+                connection.execute(text(sql))
+
+        # ADD FKs missing in database
+        for cols, (ref_table, ref_cols, name) in model_fks_map.items():
+            if cols not in existing_fks_map:
+                local_cols = ", ".join(f'"{c}"' for c in cols)
+                remote_cols = ", ".join(f'"{c}"' for c in ref_cols)
+                sql = (
+                    f'ALTER TABLE "{schema}"."{table_name}" '
+                    f'ADD CONSTRAINT "{name}" FOREIGN KEY ({local_cols}) '
+                    f'REFERENCES "{schema}"."{ref_table}" ({remote_cols})'
                 )
-        # Add missing FKs
-        for cols, (ref_table, ref_cols, fk_name) in model.items():
-            if cols not in existing:
-                local_sql = ", ".join(f'"{c}"' for c in cols)
-                ref_sql = ", ".join(f'"{c}"' for c in ref_cols)
-                fq_ref = f'"{ref_table}"'
-                connection.execute(
-                    text(
-                        f'ALTER TABLE {table_name} ADD CONSTRAINT "{fk_name}" FOREIGN KEY ({local_sql}) REFERENCES {fq_ref} ({ref_sql})'
-                    )
-                )
+                print(f"[FK][ADD] {sql}")
+                connection.execute(text(sql))
+
+        if not existing_fks_map and not model_fks_map:
+            print(f"[FK][NOOP] {table_name}")
 
 
 def sync_unique_constraints(connection, metadata):
     inspector = inspect(connection)
+
     for table in metadata.tables.values():
         table_name = table.name
 
@@ -587,53 +699,76 @@ def sync_unique_constraints(connection, metadata):
             for c in inspector.get_unique_constraints(table_name)
             if c.get("name")
         }
+
         model = {
             c.name: tuple(c.columns.keys())
             for c in table.constraints
             if isinstance(c, UniqueConstraint) and c.name
         }
+
+        # drop
         for name, cols in existing.items():
             if name not in model or model[name] != cols:
-                connection.execute(
-                    text(f'ALTER TABLE {table_name} DROP CONSTRAINT "{name}"')
-                )
+                sql = f'ALTER TABLE "{table_name}" DROP CONSTRAINT "{name}"'
+                print(f"[UNIQUE][DROP] {sql}")
+                connection.execute(text(sql))
+
+        # add
         for name, cols in model.items():
             if name not in existing or existing.get(name) != cols:
-                col_str = ", ".join(f'"{c}"' for c in cols)
-                connection.execute(
-                    text(
-                        f'ALTER TABLE {table_name} ADD CONSTRAINT "{name}" UNIQUE ({col_str})'
-                    )
+                col_sql = ", ".join(f'"{c}"' for c in cols)
+                sql = (
+                    f'ALTER TABLE "{table_name}" '
+                    f'ADD CONSTRAINT "{name}" UNIQUE ({col_sql})'
                 )
+                print(f"[UNIQUE][ADD] {sql}")
+                connection.execute(text(sql))
+
+        if not existing and not model:
+            print(f"[UNIQUE][NOOP] {table_name}")
 
 
 def sync_check_constraints(connection, metadata):
     inspector = inspect(connection)
+
     for table in metadata.tables.values():
         table_name = table.name
 
         existing = {
-            c["name"]: c["sqltext"]
+            c["name"]
             for c in inspector.get_check_constraints(table_name)
             if c.get("name")
         }
+
         model = {
             c.name: str(c.sqltext)
             for c in table.constraints
             if getattr(c, "sqltext", None) is not None and c.name
         }
-        for name, sqltext in existing.items():
-            if name not in model or model[name] != sqltext:
-                connection.execute(
-                    text(f'ALTER TABLE {table_name} DROP CONSTRAINT "{name}"')
-                )
+
+        # drop managed CHECK constraints
+        for name in existing & model.keys():
+            sql = f'ALTER TABLE "{table_name}" DROP CONSTRAINT "{name}"'
+            print(f"[CHECK] {sql}")
+            connection.execute(text(sql))
+
+        # add NOT VALID
         for name, sqltext in model.items():
-            if name not in existing or existing.get(name) != sqltext:
-                connection.execute(
-                    text(
-                        f'ALTER TABLE {table_name} ADD CONSTRAINT "{name}" CHECK ({sqltext})'
-                    )
-                )
+            sql = (
+                f'ALTER TABLE "{table_name}" '
+                f'ADD CONSTRAINT "{name}" CHECK ({sqltext}) NOT VALID'
+            )
+            print(f"[CHECK] {sql}")
+            connection.execute(text(sql))
+
+        # validate
+        for name in model.keys():
+            sql = f'ALTER TABLE "{table_name}" VALIDATE CONSTRAINT "{name}"'
+            print(f"[CHECK] {sql}")
+            connection.execute(text(sql))
+
+        if not existing and not model:
+            print(f'[CHECK] no managed constraints on "{table_name}"')
 
 
 # ---------- Main schema sync ----------

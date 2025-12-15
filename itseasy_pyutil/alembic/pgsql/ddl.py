@@ -68,78 +68,76 @@ class DDLManager:
 
             spec.loader.exec_module(module)
 
+    def ddl_execute(self, sql: str):
+        sql = sql.strip()
+        print(f"[DDL]\n{sql}")
+
+        with self.conn.engine.connect().execution_options(
+            isolation_level="AUTOCOMMIT"
+        ) as conn:
+            conn.execute(sa.text(sql))
+
     # ----------------------------------------------------------------
     # PostgreSQL DDL Handlers
     # ----------------------------------------------------------------
-
     def rename_table(self, old, new):
         exists_new = self.conn.execute(
             sa.text(
                 """
-                SELECT 1
-                FROM information_schema.tables
-                WHERE table_schema = 'public'
-                AND table_name = :name
+                SELECT 1 FROM information_schema.tables
+                WHERE table_schema='public' AND table_name=:name
             """
             ),
             {"name": new},
         ).fetchone()
-
         if exists_new:
             return
 
         exists_old = self.conn.execute(
             sa.text(
                 """
-                SELECT 1
-                FROM information_schema.tables
-                WHERE table_schema = 'public'
-                AND table_name = :name
+                SELECT 1 FROM information_schema.tables
+                WHERE table_schema='public' AND table_name=:name
             """
             ),
             {"name": old},
         ).fetchone()
-
         if not exists_old:
             return
 
-        self.conn.execute(sa.text(f'ALTER TABLE "{old}" RENAME TO "{new}";'))
+        self.ddl_execute(f'ALTER TABLE "{old}" RENAME TO "{new}"')
 
     def rename_column(self, table, old, new):
         exists_new = self.conn.execute(
             sa.text(
                 """
-                SELECT 1
-                FROM information_schema.columns
-                WHERE table_schema = 'public'
-                AND table_name = :table
-                AND column_name = :col
+                SELECT 1 FROM information_schema.columns
+                WHERE table_schema='public'
+                AND table_name=:table
+                AND column_name=:col
             """
             ),
             {"table": table, "col": new},
         ).fetchone()
-
         if exists_new:
             return
 
         old_col = self.conn.execute(
             sa.text(
                 """
-                SELECT data_type, is_nullable, column_default
-                FROM information_schema.columns
-                WHERE table_schema = 'public'
-                AND table_name = :table
-                AND column_name = :col
+                SELECT 1 FROM information_schema.columns
+                WHERE table_schema='public'
+                AND table_name=:table
+                AND column_name=:col
             """
             ),
             {"table": table, "col": old},
         ).fetchone()
-
         if not old_col:
             return
 
-        self.conn.execute(
-            sa.text(f'ALTER TABLE "{table}" RENAME COLUMN "{old}" TO "{new}";')
+        self.ddl_execute(
+            f'ALTER TABLE "{table}" RENAME COLUMN "{old}" TO "{new}"'
         )
 
     def create_partition(
@@ -149,17 +147,30 @@ class DDLManager:
         year=None,
         mode="year",
         months_ahead=12,
+        schema="public",
     ):
+        """
+        Create PostgreSQL partitions for a partitioned table.
+
+        Assumes parent table is already created as:
+            PARTITION BY RANGE (column)
+
+        Args:
+            table (str): Parent table name.
+            column (str): Partition column (default: created_at).
+            year (int): Starting year (default: current year).
+            mode (str): "year" or "month".
+            months_ahead (int): Number of months ahead to create partitions (only for month mode).
+            schema (str): Schema of the table (default: "public").
+        """
         now = datetime.datetime.utcnow()
         year = year or now.year
-
-        # PostgreSQL requires table already created as PARTITIONED
-        # So we assume parent table is created as PARTITION BY RANGE(column)
 
         if mode == "year":
             pname = f"{table}_p{year}"
             upper = year + 1
 
+            # Check if partition already exists
             exists = self.conn.execute(
                 sa.text(
                     """
@@ -167,15 +178,18 @@ class DDLManager:
                     FROM pg_inherits
                     JOIN pg_class parent ON pg_inherits.inhparent = parent.oid
                     JOIN pg_class child ON pg_inherits.inhrelid = child.oid
-                    WHERE parent.relname = :table AND child.relname = :pname
-                """
+                    JOIN pg_namespace nsp ON parent.relnamespace = nsp.oid
+                    WHERE parent.relname = :table
+                    AND child.relname = :pname
+                    AND nsp.nspname = :schema
+                    """
                 ),
-                {"table": table, "pname": pname},
+                {"table": table, "pname": pname, "schema": schema},
             ).fetchone()
 
             if not exists:
                 sql = f"""
-                    CREATE TABLE "{pname}" PARTITION OF "{table}"
+                    CREATE TABLE "{schema}"."{pname}" PARTITION OF "{schema}"."{table}"
                     FOR VALUES FROM ('{year}-01-01') TO ('{upper}-01-01');
                 """
                 self.conn.execute(text(sql))
@@ -198,41 +212,43 @@ class DDLManager:
                         FROM pg_inherits
                         JOIN pg_class parent ON pg_inherits.inhparent = parent.oid
                         JOIN pg_class child ON pg_inherits.inhrelid = child.oid
-                        WHERE parent.relname = :table AND child.relname = :pname
-                    """
+                        JOIN pg_namespace nsp ON parent.relnamespace = nsp.oid
+                        WHERE parent.relname = :table
+                        AND child.relname = :pname
+                        AND nsp.nspname = :schema
+                        """
                     ),
-                    {"table": table, "pname": pname},
+                    {"table": table, "pname": pname, "schema": schema},
                 ).fetchone()
 
                 if not exists:
                     sql = f"""
-                        CREATE TABLE "{pname}" PARTITION OF "{table}"
+                        CREATE TABLE "{schema}"."{pname}" PARTITION OF "{schema}"."{table}"
                         FOR VALUES FROM ('{cur.isoformat()}') TO ('{next_month.isoformat()}');
                     """
                     self.conn.execute(text(sql))
 
-                # next month
                 cur = next_month
             return
 
         else:
-            raise ValueError("Unsupported partition mode")
+            raise ValueError(
+                "Unsupported partition mode: choose 'year' or 'month'"
+            )
 
-    def create_audit_trigger(
-        self, table_name, pk_column, exclude_columns=None, drop=False
-    ):
+    def create_audit_trigger(self, table_name, pk_column, exclude_columns=None):
         if exclude_columns is None:
             exclude_columns = []
 
         rows = self.conn.execute(
             sa.text(
                 """
-            SELECT column_name
-            FROM information_schema.columns
-            WHERE table_schema = 'public'
-            AND table_name = :table
-            ORDER BY ordinal_position
-        """
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_schema = 'public'
+                AND table_name = :table
+                ORDER BY ordinal_position
+            """
             ),
             {"table": table_name},
         ).fetchall()
@@ -246,87 +262,237 @@ class DDLManager:
             [f"OLD.{c} IS DISTINCT FROM NEW.{c}" for c in diff_cols]
         )
 
-        trg_a_ins = f"{table_name}_AINS"
-        sql_a_ins = f"""
-        CREATE OR REPLACE FUNCTION {trg_a_ins}_fn() RETURNS trigger AS $$
-        BEGIN
-            INSERT INTO audit_log(table_name, row_id, action, user_id, after_data)
-            VALUES ('{table_name}', NEW.{pk_column}, 'INSERT', current_user, jsonb_build_object({json_new}));
-            RETURN NEW;
-        END;
-        $$ LANGUAGE plpgsql;
+        # ---------------- INSERT ----------------
 
-        DROP TRIGGER IF EXISTS {trg_a_ins} ON "{table_name}";
-        CREATE TRIGGER {trg_a_ins} AFTER INSERT ON "{table_name}"
-        FOR EACH ROW EXECUTE FUNCTION {trg_a_ins}_fn();
+        trg = f"{table_name}_AINS"
+
+        self.ddl_execute(
+            f"""
+            CREATE OR REPLACE FUNCTION "{trg}_fn"()
+            RETURNS trigger AS $$
+            BEGIN
+                INSERT INTO audit_log(
+                    table_name, row_id, action, user_id, after_data
+                )
+                VALUES (
+                    '{table_name}',
+                    NEW.{pk_column},
+                    'INSERT',
+                    current_user,
+                    jsonb_build_object({json_new})
+                );
+                RETURN NEW;
+            END;
+            $$ LANGUAGE plpgsql
         """
+        )
 
-        trg_a_upd = f"{table_name}_AUPD"
-        sql_a_upd = f"""
-        CREATE OR REPLACE FUNCTION {trg_a_upd}_fn() RETURNS trigger AS $$
-        BEGIN
-            IF {change_conditions} THEN
-                INSERT INTO audit_log(table_name, row_id, action, user_id, before_data, after_data)
-                VALUES ('{table_name}', NEW.{pk_column}, 'UPDATE', current_user,
+        self.ddl_execute(
+            f"""
+            DO $$
+            BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM pg_trigger WHERE tgname = '{trg}'
+                ) THEN
+                    CREATE TRIGGER "{trg}"
+                    AFTER INSERT ON "{table_name}"
+                    FOR EACH ROW EXECUTE FUNCTION "{trg}_fn"();
+                END IF;
+            END$$;
+        """
+        )
+
+        # ---------------- UPDATE ----------------
+
+        trg = f"{table_name}_AUPD"
+
+        self.ddl_execute(
+            f"""
+            CREATE OR REPLACE FUNCTION "{trg}_fn"()
+            RETURNS trigger AS $$
+            BEGIN
+                IF {change_conditions} THEN
+                    INSERT INTO audit_log(
+                        table_name, row_id, action, user_id, before_data, after_data
+                    )
+                    VALUES (
+                        '{table_name}',
+                        NEW.{pk_column},
+                        'UPDATE',
+                        current_user,
                         jsonb_build_object({json_old}),
-                        jsonb_build_object({json_new}));
-            END IF;
-            RETURN NEW;
-        END;
-        $$ LANGUAGE plpgsql;
-
-        DROP TRIGGER IF EXISTS {trg_a_upd} ON "{table_name}";
-        CREATE TRIGGER {trg_a_upd} AFTER UPDATE ON "{table_name}"
-        FOR EACH ROW EXECUTE FUNCTION {trg_a_upd}_fn();
+                        jsonb_build_object({json_new})
+                    );
+                END IF;
+                RETURN NEW;
+            END;
+            $$ LANGUAGE plpgsql
         """
+        )
 
-        trg_a_del = f"{table_name}_ADEL"
-        sql_a_del = f"""
-        CREATE OR REPLACE FUNCTION {trg_a_del}_fn() RETURNS trigger AS $$
-        BEGIN
-            INSERT INTO audit_log(table_name, row_id, action, user_id, before_data)
-            VALUES ('{table_name}', OLD.{pk_column}, 'DELETE', current_user,
-                    jsonb_build_object({json_old}));
-            RETURN OLD;
-        END;
-        $$ LANGUAGE plpgsql;
-
-        DROP TRIGGER IF EXISTS {trg_a_del} ON "{table_name}";
-        CREATE TRIGGER {trg_a_del} AFTER DELETE ON "{table_name}"
-        FOR EACH ROW EXECUTE FUNCTION {trg_a_del}_fn();
+        self.ddl_execute(
+            f"""
+            DO $$
+            BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM pg_trigger WHERE tgname = '{trg}'
+                ) THEN
+                    CREATE TRIGGER "{trg}"
+                    AFTER UPDATE ON "{table_name}"
+                    FOR EACH ROW EXECUTE FUNCTION "{trg}_fn"();
+                END IF;
+            END$$;
         """
+        )
 
-        self.conn.execute(text(sql_a_ins))
-        self.conn.execute(text(sql_a_upd))
-        self.conn.execute(text(sql_a_del))
-        print(f"Audit triggers created for table '{table_name}'")
+        # ---------------- DELETE ----------------
 
-    def create_trigger(self, name, sql, drop=False):
-        # in PostgreSQL, triggers are usually managed with CREATE OR REPLACE FUNCTION
-        self.conn.execute(sa.text(sql))
+        trg = f"{table_name}_ADEL"
 
-    def create_modified_trigger(self, table, drop=False):
+        self.ddl_execute(
+            f"""
+            CREATE OR REPLACE FUNCTION "{trg}_fn"()
+            RETURNS trigger AS $$
+            BEGIN
+                INSERT INTO audit_log(
+                    table_name, row_id, action, user_id, before_data
+                )
+                VALUES (
+                    '{table_name}',
+                    OLD.{pk_column},
+                    'DELETE',
+                    current_user,
+                    jsonb_build_object({json_old})
+                );
+                RETURN OLD;
+            END;
+            $$ LANGUAGE plpgsql
+        """
+        )
+
+        self.ddl_execute(
+            f"""
+            DO $$
+            BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM pg_trigger WHERE tgname = '{trg}'
+                ) THEN
+                    CREATE TRIGGER "{trg}"
+                    AFTER DELETE ON "{table_name}"
+                    FOR EACH ROW EXECUTE FUNCTION "{trg}_fn"();
+                END IF;
+            END$$;
+        """
+        )
+
+    def create_trigger(
+        self,
+        table: str,
+        name: str,
+        timing: str,
+        event: str,
+        body: str,
+        declare: list[str] | None = None,
+    ):
+        fn = f"{name}_fn"
+
+        declare_sql = ""
+        if declare:
+            declare_sql = "DECLARE\n    " + "\n    ".join(
+                d.rstrip(";") + ";" for d in declare
+            )
+
+        # 1. Always replace function
+        self.ddl_execute(
+            f"""
+            CREATE OR REPLACE FUNCTION "{fn}"()
+            RETURNS trigger AS $$
+            {declare_sql}
+            BEGIN
+                {body.strip()}
+            END;
+            $$ LANGUAGE plpgsql
+        """
+        )
+
+        # 2. Check trigger existence
+        exists = self.conn.execute(
+            sa.text(
+                """
+                SELECT 1
+                FROM pg_trigger t
+                JOIN pg_class c ON t.tgrelid = c.oid
+                JOIN pg_namespace n ON c.relnamespace = n.oid
+                WHERE t.tgname = :trg
+                AND c.relname = :table
+                AND n.nspname = 'public'
+            """
+            ),
+            {"trg": name, "table": table},
+        ).fetchone()
+
+        if exists:
+            return
+
+        # 3. Create trigger only if missing
+        self.ddl_execute(
+            f"""
+            CREATE TRIGGER "{name}"
+            {timing} {event} ON "{table}"
+            FOR EACH ROW EXECUTE FUNCTION "{fn}"()
+        """
+        )
+
+    def create_modified_trigger(self, table):
         name = f"{table}_BUPD"
-        sql = f"""
-        CREATE OR REPLACE FUNCTION {name}_fn() RETURNS trigger AS $$
-        BEGIN
-            NEW.modified_at = CURRENT_TIMESTAMP AT TIME ZONE 'UTC';
-            RETURN NEW;
-        END;
-        $$ LANGUAGE plpgsql;
+        fn = f"{name}_fn"
 
-        DROP TRIGGER IF EXISTS {name} ON "{table}";
-        CREATE TRIGGER {name} BEFORE UPDATE ON "{table}"
-        FOR EACH ROW EXECUTE FUNCTION {name}_fn();
+        # 1. Always replace function
+        self.ddl_execute(
+            f"""
+            CREATE OR REPLACE FUNCTION "{fn}"()
+            RETURNS trigger AS $$
+            BEGIN
+                NEW.modified_at = CURRENT_TIMESTAMP AT TIME ZONE 'UTC';
+                RETURN NEW;
+            END;
+            $$ LANGUAGE plpgsql
         """
-        self.conn.execute(sa.text(sql))
+        )
+
+        # 2. Check trigger existence
+        exists = self.conn.execute(
+            sa.text(
+                """
+                SELECT 1
+                FROM pg_trigger t
+                JOIN pg_class c ON t.tgrelid = c.oid
+                JOIN pg_namespace n ON c.relnamespace = n.oid
+                WHERE t.tgname = :trg
+                AND c.relname = :table
+                AND n.nspname = 'public'
+            """
+            ),
+            {"trg": name, "table": table},
+        ).fetchone()
+
+        if exists:
+            return
+
+        # 3. Create trigger only if missing
+        self.ddl_execute(
+            f"""
+            CREATE TRIGGER "{name}"
+            BEFORE UPDATE ON "{table}"
+            FOR EACH ROW EXECUTE FUNCTION "{fn}"()
+        """
+        )
 
     def create_procedure(self, name, body, drop=False):
         if drop:
-            self.conn.execute(sa.text(f"DROP PROCEDURE IF EXISTS {name}"))
+            self.ddl_execute(f"DROP PROCEDURE IF EXISTS {name}")
 
-        sql = f"CREATE PROCEDURE {name} {body}"
-        self.conn.execute(sa.text(sql))
+        self.ddl_execute(f"CREATE PROCEDURE {name} {body}")
 
     def run_ddl(self, sql):
-        self.conn.execute(sa.text(sql))
+        self.ddl_execute(sql)
