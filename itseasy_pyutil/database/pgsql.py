@@ -386,6 +386,18 @@ class Database(AbstractDatabase):
     async def upsert(
         self, table, identifiers=[], column_values={}, has_auto_id=True
     ):
+        """
+        Generic async upsert function.
+
+        Args:
+            table (str): Table name.
+            identifiers (list[str]): Columns defining uniqueness (for conflict detection).
+            column_values (dict): Columns and values to insert/update.
+            has_auto_id (bool): True if table has auto-increment PK (optional, not strictly needed).
+
+        Returns:
+            namedtuple: Contains identifier values + 'error' field.
+        """
         UpsertResponse = namedtuple("UpsertResponse", identifiers + ["error"])
         response_data = [column_values.get(i) for i in identifiers]
 
@@ -393,40 +405,56 @@ class Database(AbstractDatabase):
             tr = conn.transaction()
             await tr.start()
             try:
+                # Sanitize column names
                 cols = [
                     self.sanitize_identifier(c, allow_star=True)
                     for c in column_values.keys()
                 ]
                 values = list(column_values.values())
 
+                # Columns to update (exclude identifiers)
                 update_cols = [
                     c for c in column_values.keys() if c not in identifiers
                 ]
-
                 set_clause = ", ".join(
                     f"{self.sanitize_identifier(c)} = EXCLUDED.{self.sanitize_identifier(c)}"
                     for c in update_cols
                 )
 
+                # Build base insert statement
                 insert_stmt = f"""
                     INSERT INTO {self.sanitize_identifier(table)}
                     ({",".join(cols)})
                     VALUES ({", ".join(["%s"] * len(values))})
-                    ON CONFLICT ({",".join(self.sanitize_identifier(i) for i in identifiers)})
-                    DO UPDATE SET {set_clause}
-                    RETURNING *
                 """
 
-                sql, vals = self._prepare(insert_stmt, values)
+                # Only add ON CONFLICT if identifiers exist
+                if identifiers:
+                    if update_cols:
+                        insert_stmt += f"""
+                            ON CONFLICT ({",".join(self.sanitize_identifier(i) for i in identifiers)})
+                            DO UPDATE SET {set_clause}
+                        """
+                    else:
+                        insert_stmt += f"""
+                            ON CONFLICT ({",".join(self.sanitize_identifier(i) for i in identifiers)})
+                            DO NOTHING
+                        """
 
+                # Always return the row
+                insert_stmt += " RETURNING *"
+
+                # Prepare and execute
+                sql, vals = self._prepare(insert_stmt, values)
                 row = await conn.fetchrow(sql, *vals)
                 await tr.commit()
 
+                # Fill response identifiers
                 if row:
                     for idx, col in enumerate(identifiers):
                         response_data[idx] = row[col]
 
-                response_data.append(None)
+                response_data.append(None)  # No error
                 return UpsertResponse(*response_data)
 
             except Exception as e:
