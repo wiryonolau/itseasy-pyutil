@@ -190,7 +190,8 @@ class Database(AbstractDatabase):
 
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(sql, *params)
-            return row.total if row else 0
+            row = dict(row) if row else {}
+            return row.get("total", 0)
 
     async def execute(self, query, params=(), return_result: bool = False):
         try:
@@ -306,7 +307,7 @@ class Database(AbstractDatabase):
 
                 return Response(
                     success=True,
-                    lastrowid=row.id if row else None,
+                    lastrowid=row["id"] if row else None,
                     error=None,
                 )
 
