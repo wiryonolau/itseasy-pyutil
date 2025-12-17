@@ -390,30 +390,25 @@ class Database(AbstractDatabase):
         """
         Generic async upsert function.
 
-        Args:
-            table (str): Table name.
-            identifiers (list[str]): Columns defining uniqueness (for conflict detection).
-            column_values (dict): Columns and values to insert/update.
-            has_auto_id (bool): True if table has auto-increment PK (optional, not strictly needed).
-
-        Returns:
-            namedtuple: Contains identifier values + 'error' field.
+        Returns UpsertResponse:
+            - all identifier columns
+            - lastrowid (if has_auto_id)
+            - error
         """
-        UpsertResponse = namedtuple("UpsertResponse", identifiers + ["error"])
+        fields = (
+            identifiers + (["lastrowid"] if has_auto_id else []) + ["error"]
+        )
+        UpsertResponse = namedtuple("UpsertResponse", fields)
         response_data = [column_values.get(i) for i in identifiers]
 
         async with self._pool.acquire() as conn:
             tr = conn.transaction()
             await tr.start()
             try:
-                # Sanitize column names
                 cols = [
-                    self.sanitize_identifier(c, allow_star=True)
-                    for c in column_values.keys()
+                    self.sanitize_identifier(c) for c in column_values.keys()
                 ]
                 values = list(column_values.values())
-
-                # Columns to update (exclude identifiers)
                 update_cols = [
                     c for c in column_values.keys() if c not in identifiers
                 ]
@@ -422,43 +417,47 @@ class Database(AbstractDatabase):
                     for c in update_cols
                 )
 
-                # Build base insert statement
                 insert_stmt = f"""
                     INSERT INTO {self.sanitize_identifier(table)}
-                    ({",".join(cols)})
-                    VALUES ({", ".join(["%s"] * len(values))})
+                    ({','.join(cols)})
+                    VALUES ({','.join(['%s']*len(values))})
                 """
 
-                # Only add ON CONFLICT if identifiers exist
                 if identifiers:
                     if update_cols:
                         insert_stmt += f"""
-                            ON CONFLICT ({",".join(self.sanitize_identifier(i) for i in identifiers)})
+                            ON CONFLICT ({','.join(self.sanitize_identifier(i) for i in identifiers)})
                             DO UPDATE SET {set_clause}
                         """
                     else:
                         insert_stmt += f"""
-                            ON CONFLICT ({",".join(self.sanitize_identifier(i) for i in identifiers)})
+                            ON CONFLICT ({','.join(self.sanitize_identifier(i) for i in identifiers)})
                             DO NOTHING
                         """
 
-                # Always return the row
                 insert_stmt += " RETURNING *"
 
-                # Prepare and execute
                 sql, vals = self._prepare(insert_stmt, values)
                 row = await conn.fetchrow(sql, *vals)
                 await tr.commit()
 
-                # Fill response identifiers
                 if row:
+                    # update identifiers with any generated values
                     for idx, col in enumerate(identifiers):
                         response_data[idx] = row[col]
+                    # add auto id if present
+                    if has_auto_id:
+                        response_data.append(row.get("id", None))
+                else:
+                    if has_auto_id:
+                        response_data.append(None)
 
-                response_data.append(None)  # No error
+                response_data.append(None)  # error
                 return UpsertResponse(*response_data)
 
             except Exception as e:
                 await tr.rollback()
+                if has_auto_id:
+                    response_data.append(None)
                 response_data.append(str(e))
                 return UpsertResponse(*response_data)
