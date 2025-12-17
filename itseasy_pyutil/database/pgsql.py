@@ -171,7 +171,8 @@ class Database(AbstractDatabase):
         sql, params = self._prepare(query, all_params)
 
         async with self._pool.acquire() as conn:
-            return await conn.fetch(sql, *params)
+            rows = await conn.fetch(sql, *params)
+            return [dict(r) for r in rows]
 
     async def get_count(self, table, index=None, joins=[], conditions=[]):
         join_stmt, join_params = self.parse_joins(joins)
@@ -189,7 +190,7 @@ class Database(AbstractDatabase):
 
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(sql, *params)
-            return row["total"] if row else 0
+            return row.total if row else 0
 
     async def execute(self, query, params=(), return_result: bool = False):
         try:
@@ -305,7 +306,7 @@ class Database(AbstractDatabase):
 
                 return Response(
                     success=True,
-                    lastrowid=row["id"] if row else None,
+                    lastrowid=row.id if row else None,
                     error=None,
                 )
 
