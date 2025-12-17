@@ -389,16 +389,14 @@ class Database(AbstractDatabase):
         self, table, identifiers=[], column_values={}, has_auto_id=True
     ):
         """
-        Generic async upsert function.
+        PostgreSQL-only generic upsert.
 
-        Returns UpsertResponse:
-            - all identifier columns
-            - lastrowid (if has_auto_id)
-            - error
+        Returns a namedtuple containing:
+        - all identifiers
+        - id (auto-increment/identity column if has_auto_id=True)
+        - error
         """
-        fields = (
-            identifiers + (["lastrowid"] if has_auto_id else []) + ["error"]
-        )
+        fields = identifiers + (["id"] if has_auto_id else []) + ["error"]
         UpsertResponse = namedtuple("UpsertResponse", fields)
         response_data = [column_values.get(i) for i in identifiers]
 
@@ -418,6 +416,7 @@ class Database(AbstractDatabase):
                     for c in update_cols
                 )
 
+                # Build INSERT ... ON CONFLICT
                 insert_stmt = f"""
                     INSERT INTO {self.sanitize_identifier(table)}
                     ({','.join(cols)})
@@ -446,9 +445,9 @@ class Database(AbstractDatabase):
                     # update identifiers with any generated values
                     for idx, col in enumerate(identifiers):
                         response_data[idx] = row[col]
-                    # add auto id if present
+                    # fill id if auto-id column exists
                     if has_auto_id:
-                        response_data.append(row.get("id", None))
+                        response_data.append(row.get("id"))
                 else:
                     if has_auto_id:
                         response_data.append(None)
