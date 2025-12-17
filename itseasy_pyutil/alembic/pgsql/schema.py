@@ -689,43 +689,113 @@ def sync_foreign_keys(connection, metadata, schema="public"):
 
 
 def sync_unique_constraints(connection, metadata):
-    inspector = inspect(connection)
+    # --- sanity: ensure PG 15+
+    version = int(connection.execute(text("SHOW server_version_num")).scalar())
+    if version < 150000:
+        raise RuntimeError("sync_unique_constraints requires PostgreSQL >= 15")
 
     for table in metadata.tables.values():
         table_name = table.name
 
-        existing = {
-            c["name"]: tuple(c["column_names"])
-            for c in inspector.get_unique_constraints(table_name)
-            if c.get("name")
+        # --- DB unique constraints (portable detection)
+        db_uniques = {
+            row["conname"]: {
+                "columns": tuple(row["columns"]),
+                "nulls_not_distinct": "NULLS NOT DISTINCT" in row["definition"],
+            }
+            for row in connection.execute(
+                text(
+                    """
+                    SELECT
+                        c.conname,
+                        pg_get_constraintdef(c.oid) AS definition,
+                        array_agg(a.attname ORDER BY u.ordinality) AS columns
+                    FROM pg_constraint c
+                    JOIN unnest(c.conkey) WITH ORDINALITY AS u(attnum, ordinality)
+                        ON TRUE
+                    JOIN pg_attribute a
+                        ON a.attnum = u.attnum
+                       AND a.attrelid = c.conrelid
+                    WHERE c.contype = 'u'
+                      AND c.conrelid = to_regclass(:table)
+                    GROUP BY c.conname, c.oid
+                """
+                ),
+                {"table": table_name},
+            ).mappings()
         }
 
-        model = {
-            c.name: tuple(c.columns.keys())
-            for c in table.constraints
-            if isinstance(c, UniqueConstraint) and c.name
-        }
+        # --- model unique constraints
+        model_uniques = {}
+        for c in table.constraints:
+            if isinstance(c, UniqueConstraint) and c.name:
+                model_uniques[c.name] = {
+                    "columns": tuple(col.name for col in c.columns),
+                    "nulls_not_distinct": c.dialect_options["postgresql"].get(
+                        "nulls_not_distinct", False
+                    ),
+                }
 
-        # drop
-        for name, cols in existing.items():
-            if name not in model or model[name] != cols:
-                sql = f'ALTER TABLE "{table_name}" DROP CONSTRAINT "{name}"'
-                print(f"[UNIQUE][DROP] {sql}")
-                connection.execute(text(sql))
+        # --- add missing constraints (safe)
+        for name, model in model_uniques.items():
+            if name in db_uniques:
+                continue
 
-        # add
-        for name, cols in model.items():
-            if name not in existing or existing.get(name) != cols:
-                col_sql = ", ".join(f'"{c}"' for c in cols)
+            cols = ", ".join(f'"{c}"' for c in model["columns"])
+            if model["nulls_not_distinct"]:
                 sql = (
                     f'ALTER TABLE "{table_name}" '
-                    f'ADD CONSTRAINT "{name}" UNIQUE ({col_sql})'
+                    f'ADD CONSTRAINT "{name}" '
+                    f"UNIQUE NULLS NOT DISTINCT ({cols})"
                 )
-                print(f"[UNIQUE][ADD] {sql}")
-                connection.execute(text(sql))
+            else:
+                sql = (
+                    f'ALTER TABLE "{table_name}" '
+                    f'ADD CONSTRAINT "{name}" UNIQUE ({cols})'
+                )
 
-        if not existing and not model:
-            print(f"[UNIQUE][NOOP] {table_name}")
+            print(f"[UNIQUE][ADD] {table_name}.{name}")
+            connection.execute(text(sql))
+
+        # --- replace only if semantics differ (atomic)
+        for name, db in db_uniques.items():
+            model = model_uniques.get(name)
+            if not model:
+                continue
+
+            if (
+                model["columns"] == db["columns"]
+                and model["nulls_not_distinct"] == db["nulls_not_distinct"]
+            ):
+                continue
+
+            tmp = f"{name}__tmp"
+            cols = ", ".join(f'"{c}"' for c in model["columns"])
+
+            if model["nulls_not_distinct"]:
+                create = (
+                    f'ALTER TABLE "{table_name}" '
+                    f'ADD CONSTRAINT "{tmp}" '
+                    f"UNIQUE NULLS NOT DISTINCT ({cols})"
+                )
+            else:
+                create = (
+                    f'ALTER TABLE "{table_name}" '
+                    f'ADD CONSTRAINT "{tmp}" UNIQUE ({cols})'
+                )
+
+            drop_old = (
+                f'ALTER TABLE "{table_name}" ' f'DROP CONSTRAINT "{name}"'
+            )
+            rename = (
+                f'ALTER TABLE "{table_name}" '
+                f'RENAME CONSTRAINT "{tmp}" TO "{name}"'
+            )
+
+            print(f"[UNIQUE][REPLACE] {table_name}.{name}")
+            connection.execute(text(create))
+            connection.execute(text(drop_old))
+            connection.execute(text(rename))
 
 
 def sync_check_constraints(connection, metadata):
