@@ -143,6 +143,9 @@ class AbstractDatabase(abc.ABC):
     def sanitize_identifier(
         self, identifier: str, allow_star: bool = False
     ) -> str:
+        if isinstance(identifier, Expression):
+            return identifier.expr.strip()
+
         if not isinstance(identifier, str):
             self._logger.debug([identifier, allow_star])
             raise ValueError("Identifier must be a string")
