@@ -860,37 +860,53 @@ def sync_check_constraints(connection, metadata):
     for table in metadata.tables.values():
         table_name = table.name
 
+        # constraints that exist in DB
         existing = {
             c["name"]
             for c in inspector.get_check_constraints(table_name)
             if c.get("name")
         }
 
+        # constraints defined in SQLAlchemy model
         model = {
             c.name: str(c.sqltext)
             for c in table.constraints
             if getattr(c, "sqltext", None) is not None and c.name
         }
 
-        # drop managed CHECK constraints
-        for name in existing & model.keys():
+        # ------------------------------
+        # 1. Drop all constraints that exist in DB but are not in the model
+        # ------------------------------
+        for name in existing - model.keys():  # <- fix: drop orphan
             sql = f'ALTER TABLE "{table_name}" DROP CONSTRAINT "{name}"'
-            print(f"[CHECK] {sql}")
+            print(f"[CHECK] dropping orphan {sql}")
             connection.execute(text(sql))
 
-        # add NOT VALID
+        # ------------------------------
+        # 2. Drop constraints that exist in both (recreate)
+        # ------------------------------
+        for name in existing & model.keys():
+            sql = f'ALTER TABLE "{table_name}" DROP CONSTRAINT "{name}"'
+            print(f"[CHECK] recreating {sql}")
+            connection.execute(text(sql))
+
+        # ------------------------------
+        # 3. Add model constraints with NOT VALID
+        # ------------------------------
         for name, sqltext in model.items():
             sql = (
                 f'ALTER TABLE "{table_name}" '
                 f'ADD CONSTRAINT "{name}" CHECK ({sqltext}) NOT VALID'
             )
-            print(f"[CHECK] {sql}")
+            print(f"[CHECK] adding {sql}")
             connection.execute(text(sql))
 
-        # validate
+        # ------------------------------
+        # 4. Validate all model constraints
+        # ------------------------------
         for name in model.keys():
             sql = f'ALTER TABLE "{table_name}" VALIDATE CONSTRAINT "{name}"'
-            print(f"[CHECK] {sql}")
+            print(f"[CHECK] validating {sql}")
             connection.execute(text(sql))
 
         if not existing and not model:

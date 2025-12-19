@@ -386,78 +386,106 @@ class Database(AbstractDatabase):
                 )
 
     async def upsert(
-        self, table, identifiers=[], column_values={}, has_auto_id=True
+        self,
+        table,
+        identifiers,
+        column_values,
+        has_auto_id="id",
     ):
         """
-        PostgreSQL-only generic upsert.
+        PostgreSQL upsert with correct identity handling.
 
-        Returns a namedtuple containing:
-        - all identifiers
-        - id (auto-increment/identity column if has_auto_id=True)
-        - error
+        - Identity column MUST be omitted from INSERT when None
+        - identifiers contains all unique columns (including identity)
         """
-        fields = identifiers + (["id"] if has_auto_id else []) + ["error"]
-        UpsertResponse = namedtuple("UpsertResponse", fields)
-        response_data = [column_values.get(i) for i in identifiers]
 
-        async with self._pool.acquire() as conn:
-            tr = conn.transaction()
-            await tr.start()
-            try:
-                cols = [
-                    self.sanitize_identifier(c) for c in column_values.keys()
-                ]
-                values = list(column_values.values())
-                update_cols = [
-                    c for c in column_values.keys() if c not in identifiers
-                ]
+        identity_value = column_values.get(has_auto_id)
+
+        # ------------------------------------------------------------
+        # 1️⃣ Build INSERT columns
+        # ------------------------------------------------------------
+        insert_cols = []
+        insert_vals = []
+
+        for col, val in column_values.items():
+            # 🚫 omit identity column when None
+            if col == has_auto_id and val is None:
+                continue
+            insert_cols.append(col)
+            insert_vals.append(val)
+
+        # ------------------------------------------------------------
+        # 2️⃣ Conflict target (only identifiers with actual values)
+        # ------------------------------------------------------------
+        conflict_target = [
+            c
+            for c in identifiers
+            if c != has_auto_id or identity_value is not None
+        ]
+
+        # ------------------------------------------------------------
+        # 3️⃣ Columns to update (never identifiers)
+        # ------------------------------------------------------------
+        update_cols = [c for c in column_values.keys() if c not in identifiers]
+
+        # ------------------------------------------------------------
+        # 4️⃣ Build SQL
+        # ------------------------------------------------------------
+        cols_sql = ",".join(self.sanitize_identifier(c) for c in insert_cols)
+        placeholders = ",".join(["%s"] * len(insert_vals))
+
+        sql = f"""
+            INSERT INTO {self.sanitize_identifier(table)}
+            ({cols_sql})
+            VALUES ({placeholders})
+        """
+
+        if conflict_target:
+            if update_cols:
                 set_clause = ", ".join(
                     f"{self.sanitize_identifier(c)} = EXCLUDED.{self.sanitize_identifier(c)}"
                     for c in update_cols
                 )
-
-                # Build INSERT ... ON CONFLICT
-                insert_stmt = f"""
-                    INSERT INTO {self.sanitize_identifier(table)}
-                    ({','.join(cols)})
-                    VALUES ({','.join(['%s']*len(values))})
+                sql += f"""
+                    ON CONFLICT ({','.join(self.sanitize_identifier(c) for c in conflict_target)})
+                    DO UPDATE SET {set_clause}
+                """
+            else:
+                sql += f"""
+                    ON CONFLICT ({','.join(self.sanitize_identifier(c) for c in conflict_target)})
+                    DO NOTHING
                 """
 
-                if identifiers:
-                    if update_cols:
-                        insert_stmt += f"""
-                            ON CONFLICT ({','.join(self.sanitize_identifier(i) for i in identifiers)})
-                            DO UPDATE SET {set_clause}
-                        """
-                    else:
-                        insert_stmt += f"""
-                            ON CONFLICT ({','.join(self.sanitize_identifier(i) for i in identifiers)})
-                            DO NOTHING
-                        """
+        sql += " RETURNING *"
 
-                insert_stmt += " RETURNING *"
+        sql, vals = self._prepare(sql, insert_vals)
 
-                sql, vals = self._prepare(insert_stmt, values)
+        # ------------------------------------------------------------
+        # 5️⃣ Execute
+        # ------------------------------------------------------------
+        async with self._pool.acquire() as conn:
+            tr = conn.transaction()
+            await tr.start()
+            try:
                 row = await conn.fetchrow(sql, *vals)
                 await tr.commit()
 
-                if row:
-                    # update identifiers with any generated values
-                    for idx, col in enumerate(identifiers):
-                        response_data[idx] = row[col]
-                    # fill id if auto-id column exists
-                    if has_auto_id:
-                        response_data.append(row.get("id"))
-                else:
-                    if has_auto_id:
-                        response_data.append(None)
+                fields = list(column_values.keys()) + ["error"]
+                UpsertResponse = namedtuple("UpsertResponse", fields)
 
-                response_data.append(None)  # error
-                return UpsertResponse(*response_data)
+                data = []
+                for c in column_values.keys():
+                    data.append(row[c] if row else column_values.get(c))
+                data.append(None)
+
+                return UpsertResponse(*data)
 
             except Exception as e:
                 await tr.rollback()
-                if has_auto_id:
-                    response_data.append(None)
-                response_data.append(str(e))
-                return UpsertResponse(*response_data)
+
+                fields = list(column_values.keys()) + ["error"]
+                UpsertResponse = namedtuple("UpsertResponse", fields)
+                return UpsertResponse(
+                    *[column_values.get(c) for c in column_values.keys()],
+                    str(e),
+                )
