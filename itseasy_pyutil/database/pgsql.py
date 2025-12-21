@@ -24,19 +24,61 @@ class Database(AbstractDatabase):
         if self._as_dev:
             self._logger.debug(self.get_sql_string(sql, params))
 
-        """
-        Convert MySQL-style %s placeholders to asyncpg-style $1, $2...
-        Only for asyncpg; leaves actual parameters untouched.
-        """
+        has_percent = "%s" in sql
+        has_dollar = bool(re.search(r"\$\d+", sql))
+        has_named = bool(re.search(r":\w+", sql))
 
-        if "%s" in sql:
+        # 🚫 mixed placeholder styles
+        styles = sum([has_percent, has_dollar, has_named])
+        if styles > 1:
+            raise ValueError("Mixed SQL placeholder styles are not supported")
+
+        # -------------------------------------------------
+        # Case 1: asyncpg native ($1, $2...)
+        # -------------------------------------------------
+        if has_dollar:
+            return sql, params
+
+        # -------------------------------------------------
+        # Case 2: MySQL-style %s → $1, $2...
+        # -------------------------------------------------
+        if has_percent:
+            if not isinstance(params, (list, tuple)):
+                raise TypeError("%s placeholders require positional params")
+
             parts = sql.split("%s")
             sql = (
                 "".join(f"{part}${i+1}" for i, part in enumerate(parts[:-1]))
                 + parts[-1]
             )
 
-        return sql, params
+            return sql, params
+
+        # -------------------------------------------------
+        # Case 3: SQLAlchemy-style :param → $1, $2...
+        # -------------------------------------------------
+        if has_named:
+            if not isinstance(params, dict):
+                raise TypeError(":param placeholders require dict params")
+
+            names = []
+
+            def repl(match):
+                name = match.group(1)
+                if name not in params:
+                    raise KeyError(f"Missing SQL param :{name}")
+                names.append(name)
+                return f"${len(names)}"
+
+            sql = re.sub(r":(\w+)", repl, sql)
+            values = [params[name] for name in names]
+
+            return sql, values
+
+        # -------------------------------------------------
+        # No placeholders
+        # -------------------------------------------------
+        return sql, []
 
     async def connect(self):
         self._pool = await asyncpg.create_pool(
