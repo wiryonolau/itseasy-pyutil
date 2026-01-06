@@ -118,8 +118,9 @@ class DatabaseAware:
 
 
 class AbstractDatabase(abc.ABC):
-    def __init__(self, db_config, as_dev: bool = False):
+    def __init__(self, db_config, as_dev: bool = False, dialects=None):
         self._db_config = db_config
+        self._dialects = dialects
         self._pool = None
         self._as_dev = as_dev
 
@@ -390,7 +391,10 @@ class AbstractDatabase(abc.ABC):
                     continue
 
                 if isinstance(value, bool):
-                    value = int(value)
+                    if self._dialects in ["pgsql", "postgresql"]:
+                        return bool(value)
+                    else:
+                        value = int(value)
                 elif isinstance(value, bytes):
                     value = pymysql.Binary(value)
 
