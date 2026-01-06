@@ -928,6 +928,6 @@ def sync_schema(engine, metadata):
                 )
         sync_primary_keys(conn, metadata)
         sync_indexes(conn, metadata)
-        sync_foreign_keys(conn, metadata)
         sync_unique_constraints(conn, metadata)
+        sync_foreign_keys(conn, metadata)
         sync_check_constraints(conn, metadata)

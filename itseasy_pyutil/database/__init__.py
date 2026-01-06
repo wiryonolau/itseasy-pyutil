@@ -191,9 +191,13 @@ class AbstractDatabase(abc.ABC):
                 elif obj.opr == "lte":
                     opr = "<="
                 elif obj.opr == "contain":
+                    if not isinstance(value, str) or not value.strip():
+                        continue
                     opr = "LIKE"
                     value = f"%{value}%"
                 elif obj.opr == "startswith":
+                    if not isinstance(value, str) or not value.strip():
+                        continue
                     opr = "LIKE"
                     value = f"{value}%"
                 elif obj.opr == "includes":
