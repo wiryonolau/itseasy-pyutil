@@ -429,105 +429,70 @@ class Database(AbstractDatabase):
 
     async def upsert(
         self,
-        table,
-        identifiers,
-        column_values,
-        has_auto_id="id",
+        table: str,
+        conflict_columns: list[str],
+        data: dict,
+        identity_column: str = "id",
     ):
         """
-        PostgreSQL upsert with correct identity handling.
-
-        - Identity column MUST be omitted from INSERT when None
-        - identifiers contains all unique columns (including identity)
+        PostgreSQL UPSERT
+        - No second SELECT
+        - IDENTITY safe
+        - Always returns full row
         """
 
-        identity_value = column_values.get(has_auto_id)
+        # ------------------------------------------------------------
+        # 1️⃣ Build INSERT data (omit identity when None)
+        # ------------------------------------------------------------
+        insert_data = {
+            k: v
+            for k, v in data.items()
+            if not (k == identity_column and v is None)
+        }
+
+        if not insert_data:
+            raise ValueError("Nothing to insert")
 
         # ------------------------------------------------------------
-        # 1️⃣ Build INSERT columns
+        # 2️⃣ SQL parts
         # ------------------------------------------------------------
-        insert_cols = []
-        insert_vals = []
+        insert_cols = [self.sanitize_identifier(c) for c in insert_data]
+        placeholders = ["%s"] * len(insert_cols)
 
-        for col, val in column_values.items():
-            # 🚫 omit identity column when None
-            if col == has_auto_id and val is None:
-                continue
-            insert_cols.append(col)
-            insert_vals.append(val)
+        conflict_cols = [self.sanitize_identifier(c) for c in conflict_columns]
+
+        # update everything except identity
+        update_cols = [c for c in insert_data if c != identity_column]
 
         # ------------------------------------------------------------
-        # 2️⃣ Conflict target (only identifiers with actual values)
+        # 3️⃣ Build SQL
         # ------------------------------------------------------------
-        conflict_target = [
-            c
-            for c in identifiers
-            if c != has_auto_id or identity_value is not None
-        ]
-
-        # ------------------------------------------------------------
-        # 3️⃣ Columns to update (never identifiers)
-        # ------------------------------------------------------------
-        update_cols = [c for c in column_values.keys() if c not in identifiers]
-
-        # ------------------------------------------------------------
-        # 4️⃣ Build SQL
-        # ------------------------------------------------------------
-        cols_sql = ",".join(self.sanitize_identifier(c) for c in insert_cols)
-        placeholders = ",".join(["%s"] * len(insert_vals))
-
         sql = f"""
             INSERT INTO {self.sanitize_identifier(table)}
-            ({cols_sql})
-            VALUES ({placeholders})
+            ({", ".join(insert_cols)})
+            VALUES ({", ".join(placeholders)})
+            ON CONFLICT ({", ".join(conflict_cols)})
+            DO UPDATE SET
+            {", ".join(
+                f"{self.sanitize_identifier(c)} = EXCLUDED.{self.sanitize_identifier(c)}"
+                for c in update_cols
+            )}
+            RETURNING *
         """
 
-        if conflict_target:
-            if update_cols:
-                set_clause = ", ".join(
-                    f"{self.sanitize_identifier(c)} = EXCLUDED.{self.sanitize_identifier(c)}"
-                    for c in update_cols
-                )
-                sql += f"""
-                    ON CONFLICT ({','.join(self.sanitize_identifier(c) for c in conflict_target)})
-                    DO UPDATE SET {set_clause}
-                """
-            else:
-                sql += f"""
-                    ON CONFLICT ({','.join(self.sanitize_identifier(c) for c in conflict_target)})
-                    DO NOTHING
-                """
-
-        sql += " RETURNING *"
-
-        sql, vals = self._prepare(sql, insert_vals)
+        sql, values = self._prepare(sql, list(insert_data.values()))
 
         # ------------------------------------------------------------
-        # 5️⃣ Execute
+        # 4️⃣ Execute
         # ------------------------------------------------------------
         async with self._pool.acquire() as conn:
-            tr = conn.transaction()
-            await tr.start()
-            try:
-                row = await conn.fetchrow(sql, *vals)
-                await tr.commit()
+            async with conn.transaction():
+                row = await conn.fetchrow(sql, *values)
 
-                fields = list(column_values.keys()) + ["error"]
-                UpsertResponse = namedtuple("UpsertResponse", fields)
+        # ------------------------------------------------------------
+        # 5️⃣ Return full row
+        # ------------------------------------------------------------
+        fields = list(row.keys())
+        UpsertResponse = namedtuple("UpsertResponse", fields)
 
-                data = []
-                for c in column_values.keys():
-                    data.append(row[c] if row else column_values.get(c))
-                data.append(None)
-
-                return UpsertResponse(*data)
-
-            except Exception as e:
-                await tr.rollback()
-
-                fields = list(column_values.keys()) + ["error"]
-                UpsertResponse = namedtuple("UpsertResponse", fields)
-                return UpsertResponse(
-                    *[column_values.get(c) for c in column_values.keys()],
-                    str(e),
-                )
+        return UpsertResponse(**row)
