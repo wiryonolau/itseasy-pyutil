@@ -439,73 +439,71 @@ class Database(AbstractDatabase):
         - No second SELECT
         - Identity-safe
         - Always returns full row
+        - Never raises DB errors to caller
         """
 
-        # ------------------------------------------------------------
-        # 1️⃣ Build INSERT data (omit auto id when None)
-        # ------------------------------------------------------------
-        insert_data = {
-            k: v
-            for k, v in column_values.items()
-            if not (k == has_auto_id and v is None)
-        }
+        try:
+            # ------------------------------------------------------------
+            # 1️⃣ Build INSERT data (omit auto id when None)
+            # ------------------------------------------------------------
+            insert_data = {
+                k: v
+                for k, v in column_values.items()
+                if not (k == has_auto_id and v is None)
+            }
 
-        if not insert_data:
-            raise ValueError("Nothing to insert")
+            if not insert_data:
+                raise ValueError("Nothing to insert")
 
-        # ------------------------------------------------------------
-        # 2️⃣ SQL parts
-        # ------------------------------------------------------------
-        insert_cols = [self.sanitize_identifier(c) for c in insert_data.keys()]
-        placeholders = ["%s"] * len(insert_cols)
-        conflict_cols = [self.sanitize_identifier(c) for c in identifiers]
+            # ------------------------------------------------------------
+            # 2️⃣ SQL parts
+            # ------------------------------------------------------------
+            insert_cols = [self.sanitize_identifier(c) for c in insert_data]
+            placeholders = ["%s"] * len(insert_cols)
+            conflict_cols = [self.sanitize_identifier(c) for c in identifiers]
 
-        # update everything except auto id
-        update_cols = [c for c in insert_data if c != has_auto_id]
+            update_cols = [c for c in insert_data if c != has_auto_id]
 
-        # ------------------------------------------------------------
-        # 3️⃣ Build SQL
-        # ------------------------------------------------------------
-        if update_cols:
-            update_clause = ", ".join(
-                f"{self.sanitize_identifier(c)} = EXCLUDED.{self.sanitize_identifier(c)}"
-                for c in update_cols
-            )
-            conflict_action = f"""
-                ON CONFLICT ({", ".join(conflict_cols)})
-                DO UPDATE SET {update_clause}
+            if update_cols:
+                update_clause = ", ".join(
+                    f"{self.sanitize_identifier(c)} = EXCLUDED.{self.sanitize_identifier(c)}"
+                    for c in update_cols
+                )
+                conflict_action = f"""
+                    ON CONFLICT ({", ".join(conflict_cols)})
+                    DO UPDATE SET {update_clause}
+                """
+            else:
+                conflict_action = f"""
+                    ON CONFLICT ({", ".join(conflict_cols)})
+                    DO NOTHING
+                """
+
+            sql = f"""
+                INSERT INTO {self.sanitize_identifier(table)}
+                ({", ".join(insert_cols)})
+                VALUES ({", ".join(placeholders)})
+                {conflict_action}
+                RETURNING *
             """
-        else:
-            # conflict but nothing to update (identity-only insert)
-            conflict_action = f"""
-                ON CONFLICT ({", ".join(conflict_cols)})
-                DO NOTHING
-            """
 
-        sql = f"""
-            INSERT INTO {self.sanitize_identifier(table)}
-            ({", ".join(insert_cols)})
-            VALUES ({", ".join(placeholders)})
-            {conflict_action}
-            RETURNING *
-        """
+            sql, values = self._prepare(sql, list(insert_data.values()))
 
-        sql, values = self._prepare(sql, list(insert_data.values()))
+            async with self._pool.acquire() as conn:
+                async with conn.transaction():
+                    row = await conn.fetchrow(sql, *values)
 
-        # ------------------------------------------------------------
-        # 4️⃣ Execute
-        # ------------------------------------------------------------
-        async with self._pool.acquire() as conn:
-            async with conn.transaction():
-                row = await conn.fetchrow(sql, *values)
+            # ------------------------------------------------------------
+            # 3️⃣ Success response
+            # ------------------------------------------------------------
+            fields = list(row.keys()) + ["error"]
+            UpsertResponse = namedtuple("UpsertResponse", fields)
 
-        if row is None:
-            raise RuntimeError("UPSERT failed to return a row")
+            return UpsertResponse(**row, error=None)
 
-        # ------------------------------------------------------------
-        # 5️⃣ Return full row
-        # ------------------------------------------------------------
-        fields = row.keys()
-        UpsertResponse = namedtuple("UpsertResponse", fields)
-
-        return UpsertResponse(**row)
+        except Exception as exc:
+            # ------------------------------------------------------------
+            # 4️⃣ Failure response (NO RETHROW)
+            # ------------------------------------------------------------
+            UpsertResponse = namedtuple("UpsertResponse", ["error"])
+            return UpsertResponse(error=str(exc))
