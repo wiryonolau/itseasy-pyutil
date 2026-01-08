@@ -429,25 +429,25 @@ class Database(AbstractDatabase):
 
     async def upsert(
         self,
-        table: str,
-        conflict_columns: list[str],
-        data: dict,
-        identity_column: str = "id",
+        table,
+        identifiers,
+        column_values,
+        has_auto_id="id",
     ):
         """
         PostgreSQL UPSERT
         - No second SELECT
-        - IDENTITY safe
+        - Identity-safe
         - Always returns full row
         """
 
         # ------------------------------------------------------------
-        # 1️⃣ Build INSERT data (omit identity when None)
+        # 1️⃣ Build INSERT data (omit auto id when None)
         # ------------------------------------------------------------
         insert_data = {
             k: v
-            for k, v in data.items()
-            if not (k == identity_column and v is None)
+            for k, v in column_values.items()
+            if not (k == has_auto_id and v is None)
         }
 
         if not insert_data:
@@ -456,27 +456,37 @@ class Database(AbstractDatabase):
         # ------------------------------------------------------------
         # 2️⃣ SQL parts
         # ------------------------------------------------------------
-        insert_cols = [self.sanitize_identifier(c) for c in insert_data]
+        insert_cols = [self.sanitize_identifier(c) for c in insert_data.keys()]
         placeholders = ["%s"] * len(insert_cols)
+        conflict_cols = [self.sanitize_identifier(c) for c in identifiers]
 
-        conflict_cols = [self.sanitize_identifier(c) for c in conflict_columns]
-
-        # update everything except identity
-        update_cols = [c for c in insert_data if c != identity_column]
+        # update everything except auto id
+        update_cols = [c for c in insert_data if c != has_auto_id]
 
         # ------------------------------------------------------------
         # 3️⃣ Build SQL
         # ------------------------------------------------------------
+        if update_cols:
+            update_clause = ", ".join(
+                f"{self.sanitize_identifier(c)} = EXCLUDED.{self.sanitize_identifier(c)}"
+                for c in update_cols
+            )
+            conflict_action = f"""
+                ON CONFLICT ({", ".join(conflict_cols)})
+                DO UPDATE SET {update_clause}
+            """
+        else:
+            # conflict but nothing to update (identity-only insert)
+            conflict_action = f"""
+                ON CONFLICT ({", ".join(conflict_cols)})
+                DO NOTHING
+            """
+
         sql = f"""
             INSERT INTO {self.sanitize_identifier(table)}
             ({", ".join(insert_cols)})
             VALUES ({", ".join(placeholders)})
-            ON CONFLICT ({", ".join(conflict_cols)})
-            DO UPDATE SET
-            {", ".join(
-                f"{self.sanitize_identifier(c)} = EXCLUDED.{self.sanitize_identifier(c)}"
-                for c in update_cols
-            )}
+            {conflict_action}
             RETURNING *
         """
 
@@ -489,10 +499,13 @@ class Database(AbstractDatabase):
             async with conn.transaction():
                 row = await conn.fetchrow(sql, *values)
 
+        if row is None:
+            raise RuntimeError("UPSERT failed to return a row")
+
         # ------------------------------------------------------------
         # 5️⃣ Return full row
         # ------------------------------------------------------------
-        fields = list(row.keys())
+        fields = row.keys()
         UpsertResponse = namedtuple("UpsertResponse", fields)
 
         return UpsertResponse(**row)
