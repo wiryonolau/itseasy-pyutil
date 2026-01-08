@@ -197,7 +197,7 @@ class Database(AbstractDatabase):
         columns = [
             self.sanitize_identifier(c, allow_star=True) for c in columns
         ]
-        orders = [self.sanitize_order(o) for o in orders]
+        orders = [self.sanitize_order(o) for o in orders if o.strip()]
 
         query = f"""
             SELECT {",".join(columns) or "*"}

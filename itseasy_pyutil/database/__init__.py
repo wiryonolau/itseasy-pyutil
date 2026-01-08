@@ -211,6 +211,9 @@ class AbstractDatabase(abc.ABC):
                 elif obj.opr == "notempty":
                     opr = "IS NOT"
                     value = None
+                elif obj.opr == "bt":
+                    opr = "BETWEEN"
+                    value = [v.strip() for v in value.split(",")]
                 else:
                     continue
 
@@ -287,7 +290,10 @@ class AbstractDatabase(abc.ABC):
             for i in range(len(values)):
                 val = values[i]
                 if isinstance(val, bool):
-                    formatted_val = str(int(val))
+                    if self._dialects in ["pgsql", "postgresql"]:
+                        formatted_val = str(val).lower()
+                    else:
+                        formatted_val = str(int(val))
                 elif isinstance(val, int):
                     formatted_val = str(val)
                 elif isinstance(val, bytes):
@@ -452,7 +458,7 @@ class AbstractDatabase(abc.ABC):
         columns = [
             self.sanitize_identifier(c, allow_star=True) for c in columns
         ]
-        orders = [self.sanitize_order(o) for o in orders]
+        orders = [self.sanitize_order(o) for o in orders if o.strip()]
 
         stmt = f"""
             SELECT {",".join(columns) or "*"}
