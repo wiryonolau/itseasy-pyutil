@@ -80,9 +80,20 @@ class Database(AbstractDatabase):
         # -------------------------------------------------
         return sql, []
 
+    async def _reset_connection(self, conn):
+        try:
+            # Try to reset session state
+            await conn.execute("DISCARD ALL")
+        except Exception:
+            self._logger.warning("Discarding broken DB connection")
+            # If reset fails, the connection is unsafe → kill it
+            await conn.close()
+
     async def connect(self):
         self._pool = await asyncpg.create_pool(
             **self._db_config,
+            max_inactive_connection_lifetime=60,
+            reset=self._reset_connection,
         )
 
     async def get_connection(self):
