@@ -82,8 +82,6 @@ class Database(AbstractDatabase):
 
     async def connect(self):
         self._pool = await asyncpg.create_pool(
-            min_size=1,
-            max_size=5,
             **self._db_config,
         )
 

@@ -26,9 +26,6 @@ from itseasy_pyutil.database import (
 class Database(AbstractDatabase):
     async def connect(self):
         self._pool = await aiomysql.create_pool(
-            minsize=1,
-            maxsize=5,
-            autocommit=True,
             **self._db_config,
         )
 
