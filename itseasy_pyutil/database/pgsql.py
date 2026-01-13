@@ -22,9 +22,6 @@ from itseasy_pyutil.database import (
 
 class Database(AbstractDatabase):
     def prepare(self, sql, params):
-        if self._as_dev:
-            self._logger.debug(self.get_sql_string(sql, params))
-
         has_percent = "%s" in sql
         has_dollar = bool(re.search(r"\$\d+", sql))
         has_named = bool(re.search(r"(?<!:):\w+", sql))  # 👈 FIXED
@@ -38,12 +35,12 @@ class Database(AbstractDatabase):
         # Case 1: asyncpg native ($1, $2...)
         # -------------------------------------------------
         if has_dollar:
-            return sql, params
+            pass
 
         # -------------------------------------------------
         # Case 2: MySQL-style %s → $1, $2...
         # -------------------------------------------------
-        if has_percent:
+        elif has_percent:
             if not isinstance(params, (list, tuple)):
                 raise TypeError("%s placeholders require positional params")
 
@@ -53,12 +50,10 @@ class Database(AbstractDatabase):
                 + parts[-1]
             )
 
-            return sql, params
-
         # -------------------------------------------------
         # Case 3: SQLAlchemy-style :param → $1, $2...
         # -------------------------------------------------
-        if has_named:
+        elif has_named:
             if not isinstance(params, dict):
                 raise TypeError(":param placeholders require dict params")
 
@@ -74,12 +69,16 @@ class Database(AbstractDatabase):
             sql = re.sub(r"(?<!:):(\w+)", repl, sql)  # 👈 FIXED
             values = [params[name] for name in names]
 
-            return sql, values
+            params = values
+        else:
+            params = []
 
+        if self._as_dev:
+            self._logger.debug(self.get_sql_string(sql, params))
         # -------------------------------------------------
         # No placeholders
         # -------------------------------------------------
-        return sql, []
+        return sql, params
 
     async def connect(self):
         self._pool = await asyncpg.create_pool(
@@ -455,8 +454,9 @@ class Database(AbstractDatabase):
     ):
         """
         PostgreSQL UPSERT
-        - No second SELECT
         - Identity-safe
+        - Never emits invalid ON CONFLICT
+        - Never conflicts on missing values
         - Always returns full row
         - Never raises DB errors to caller
         """
@@ -475,29 +475,53 @@ class Database(AbstractDatabase):
                 raise ValueError("Nothing to insert")
 
             # ------------------------------------------------------------
-            # 2️⃣ SQL parts
+            # 2️⃣ Sanitize identifiers AND ensure they are usable
+            #     (must exist in insert_data and not be None)
+            # ------------------------------------------------------------
+            identifiers = [
+                c
+                for c in identifiers
+                if c in insert_data and insert_data[c] is not None
+            ]
+
+            # ------------------------------------------------------------
+            # 3️⃣ SQL parts
             # ------------------------------------------------------------
             insert_cols = [self.sanitize_identifier(c) for c in insert_data]
             placeholders = ["%s"] * len(insert_cols)
             conflict_cols = [self.sanitize_identifier(c) for c in identifiers]
 
-            update_cols = [c for c in insert_data if c != has_auto_id]
+            # Never update conflict keys or auto id
+            update_cols = [
+                c
+                for c in insert_data
+                if c not in identifiers and c != has_auto_id
+            ]
 
-            if update_cols:
-                update_clause = ", ".join(
-                    f"{self.sanitize_identifier(c)} = EXCLUDED.{self.sanitize_identifier(c)}"
-                    for c in update_cols
-                )
-                conflict_action = f"""
-                    ON CONFLICT ({", ".join(conflict_cols)})
-                    DO UPDATE SET {update_clause}
-                """
+            # ------------------------------------------------------------
+            # 4️⃣ Build conflict clause safely
+            # ------------------------------------------------------------
+            if conflict_cols:
+                if update_cols:
+                    update_clause = ", ".join(
+                        f"{self.sanitize_identifier(c)} = EXCLUDED.{self.sanitize_identifier(c)}"
+                        for c in update_cols
+                    )
+                    conflict_action = f"""
+                        ON CONFLICT ({", ".join(conflict_cols)})
+                        DO UPDATE SET {update_clause}
+                    """
+                else:
+                    conflict_action = f"""
+                        ON CONFLICT ({", ".join(conflict_cols)})
+                        DO NOTHING
+                    """
             else:
-                conflict_action = f"""
-                    ON CONFLICT ({", ".join(conflict_cols)})
-                    DO NOTHING
-                """
+                conflict_action = ""
 
+            # ------------------------------------------------------------
+            # 5️⃣ Final SQL
+            # ------------------------------------------------------------
             sql = f"""
                 INSERT INTO {self.sanitize_identifier(table)}
                 ({", ".join(insert_cols)})
@@ -513,7 +537,7 @@ class Database(AbstractDatabase):
                     row = await conn.fetchrow(sql, *values)
 
             # ------------------------------------------------------------
-            # 3️⃣ Success response
+            # 6️⃣ Success response
             # ------------------------------------------------------------
             fields = list(row.keys()) + ["error"]
             UpsertResponse = namedtuple("UpsertResponse", fields)
@@ -522,7 +546,7 @@ class Database(AbstractDatabase):
 
         except Exception as exc:
             # ------------------------------------------------------------
-            # 4️⃣ Failure response (NO RETHROW)
+            # 7️⃣ Failure response (NO RETHROW)
             # ------------------------------------------------------------
             UpsertResponse = namedtuple("UpsertResponse", ["error"])
             return UpsertResponse(error=str(exc))
