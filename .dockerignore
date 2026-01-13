@@ -1,0 +1,23 @@
+# To check use "rsync -avn . /dev/shm --exclude-from .dockerignore | less"
+*.egg-info*
+*.local*
+*.test*
+.gitignore
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.cache
+.env
+.git
+.prettierrc
+.vscode
+Makefile
+README.md
+docker
+docker-compose*
+etc
+run
+var
+build
+dist

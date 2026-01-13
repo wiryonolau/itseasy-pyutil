@@ -26,7 +26,7 @@ class Database(AbstractDatabase):
 
         has_percent = "%s" in sql
         has_dollar = bool(re.search(r"\$\d+", sql))
-        has_named = bool(re.search(r":\w+", sql))
+        has_named = bool(re.search(r"(?<!:):\w+", sql))  # 👈 FIXED
 
         # 🚫 mixed placeholder styles
         styles = sum([has_percent, has_dollar, has_named])
@@ -70,7 +70,7 @@ class Database(AbstractDatabase):
                 names.append(name)
                 return f"${len(names)}"
 
-            sql = re.sub(r":(\w+)", repl, sql)
+            sql = re.sub(r"(?<!:):(\w+)", repl, sql)  # 👈 FIXED
             values = [params[name] for name in names]
 
             return sql, values
@@ -120,16 +120,32 @@ class Database(AbstractDatabase):
             self._pool = None
 
     @asynccontextmanager
-    async def get_conn(self):
-        """
-        Acquire a connection from the pool.
-        Yields (conn,) because asyncpg doesn't use cursors like aiomysql.
-        """
-        async with self._pool.acquire() as conn:
+    async def _acquire_pool(self):
+        conn = await self._pool.acquire()
+        released = False
+        try:
+            yield conn
+
+        except asyncio.CancelledError:
             try:
-                yield (conn,)
+                await conn.close()
             finally:
-                pass  # pool handles release automatically
+                released = True
+            raise
+
+        except Exception:
+            try:
+                await conn.close()
+            finally:
+                released = True
+            raise
+
+        finally:
+            if not released:
+                try:
+                    await self._pool.release(conn)
+                except Exception:
+                    pass
 
     @asynccontextmanager
     async def tx(self):
@@ -137,7 +153,7 @@ class Database(AbstractDatabase):
         Transaction context manager: begin, commit, rollback automatically.
         Yields the connection for executing queries.
         """
-        async with self._pool.acquire() as conn:
+        async with self._acquire_pool() as conn:
             tr = conn.transaction()
             await tr.start()  # BEGIN
             try:
@@ -149,13 +165,13 @@ class Database(AbstractDatabase):
 
     async def get_rows(self, query, params=()):
         sql, params = self._prepare(query, params)
-        async with self._pool.acquire() as conn:
+        async with self._acquire_pool() as conn:
             rows = await conn.fetch(sql, *params)
             return [dict(r) for r in rows]
 
     async def get_row(self, query, params=()):
         sql, params = self._prepare(query, params)
-        async with self._pool.acquire() as conn:
+        async with self._acquire_pool() as conn:
             row = await conn.fetchrow(sql, *params)
             return dict(row) if row else None
 
@@ -210,7 +226,7 @@ class Database(AbstractDatabase):
         all_params = join_params + conditions_params + [limit, offset]
         sql, params = self._prepare(query, all_params)
 
-        async with self._pool.acquire() as conn:
+        async with self._acquire_pool() as conn:
             rows = await conn.fetch(sql, *params)
             return [dict(r) for r in rows]
 
@@ -228,14 +244,14 @@ class Database(AbstractDatabase):
         all_params = join_params + conditions_params
         sql, params = self._prepare(query, all_params)
 
-        async with self._pool.acquire() as conn:
+        async with self._acquire_pool() as conn:
             row = await conn.fetchrow(sql, *params)
             row = dict(row) if row else {}
             return row.get("total", 0)
 
     async def execute(self, query, params=(), return_result: bool = False):
         try:
-            async with self._pool.acquire() as conn:
+            async with self._acquire_pool() as conn:
                 if return_result:
                     rows = await conn.fetch(query, *params)
                     return rows
@@ -262,7 +278,7 @@ class Database(AbstractDatabase):
         statements: list of (query,) or (query, params)
         """
         affected_rows = 0
-        async with self._pool.acquire() as conn:
+        async with self._acquire_pool() as conn:
             tr = conn.transaction()
             await tr.start()
             try:
@@ -300,7 +316,7 @@ class Database(AbstractDatabase):
 
         query, params = self._prepare(query, params)
 
-        async with self._pool.acquire() as conn:
+        async with self._acquire_pool() as conn:
             tr = conn.transaction()
             await tr.start()
             try:
@@ -319,7 +335,7 @@ class Database(AbstractDatabase):
         """
         Insert without condition check (asyncpg version)
         """
-        async with self._pool.acquire() as conn:
+        async with self._acquire_pool() as conn:
             tr = conn.transaction()
             await tr.start()  # BEGIN
 
@@ -364,7 +380,7 @@ class Database(AbstractDatabase):
     async def update(
         self, table, identifiers=[], column_values={}, conditions=[]
     ):
-        async with self._pool.acquire() as conn:
+        async with self._acquire_pool() as conn:
             tr = conn.transaction()
             await tr.start()  # BEGIN
 
@@ -487,7 +503,7 @@ class Database(AbstractDatabase):
 
             sql, values = self._prepare(sql, list(insert_data.values()))
 
-            async with self._pool.acquire() as conn:
+            async with self._acquire_pool() as conn:
                 async with conn.transaction():
                     row = await conn.fetchrow(sql, *values)
 
