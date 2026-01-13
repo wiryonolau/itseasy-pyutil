@@ -1,5 +1,6 @@
 import collections
 import datetime
+import decimal
 import enum
 import json
 import logging
@@ -179,14 +180,17 @@ class Map(dict):
 
 
 def boolval(value) -> bool:
+    if isinstance(value, str):
+        value = value.lower()
+
     if value == "true":
-        return True
-    elif value == "True":
         return True
     elif value == "false":
         return False
-    elif value == "False":
-        return False
+    elif value == "yes":
+        return True
+    elif value == "no":
+        return 0
     elif value == "0":
         return False
     elif value == 0:
@@ -203,18 +207,21 @@ class CustomJsonEncoder(json.JSONEncoder):
     def default(self, obj):
         if isinstance(obj, (datetime.datetime, datetime.date, datetime.time)):
             return obj.strftime("%Y-%m-%dT%H:%M:%SZ")
+
         elif isinstance(obj, datetime.timedelta):
             return (datetime.datetime.min + obj).time().isoformat()
 
-        # UUID
         elif isinstance(obj, uuid.UUID):
             return str(obj)
 
-        # Enum
         elif isinstance(obj, enum.Enum):
             return obj.value
 
-        return super().default(obj)
+        elif isinstance(obj, decimal.Decimal):
+            return format(obj, "f")
+
+        # FINAL FALLBACK: never crash
+        return str(obj)
 
 
 def json_dumps(data):

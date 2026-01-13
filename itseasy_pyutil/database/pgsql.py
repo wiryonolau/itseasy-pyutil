@@ -132,6 +132,7 @@ class Database(AbstractDatabase):
                 await conn.close()
             finally:
                 released = True
+            self._logger.error("CancelledError occurred", exc_info=True)
             raise
 
         except Exception:
@@ -139,6 +140,7 @@ class Database(AbstractDatabase):
                 await conn.close()
             finally:
                 released = True
+            self._logger.error("Database exception occurred", exc_info=True)
             raise
 
         finally:
@@ -146,7 +148,9 @@ class Database(AbstractDatabase):
                 try:
                     await self._pool.release(conn)
                 except Exception:
-                    pass
+                    self._logger.error(
+                        "Failed to release connection", exc_info=True
+                    )
 
     @asynccontextmanager
     async def tx(self):
