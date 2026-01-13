@@ -21,7 +21,7 @@ from itseasy_pyutil.database import (
 
 
 class Database(AbstractDatabase):
-    def _prepare(self, sql, params):
+    def prepare(self, sql, params):
         if self._as_dev:
             self._logger.debug(self.get_sql_string(sql, params))
 
@@ -165,13 +165,13 @@ class Database(AbstractDatabase):
                 raise
 
     async def get_rows(self, query, params=()):
-        sql, params = self._prepare(query, params)
+        sql, params = self.prepare(query, params)
         async with self._acquire_pool() as conn:
             rows = await conn.fetch(sql, *params)
             return [dict(r) for r in rows]
 
     async def get_row(self, query, params=()):
-        sql, params = self._prepare(query, params)
+        sql, params = self.prepare(query, params)
         async with self._acquire_pool() as conn:
             row = await conn.fetchrow(sql, *params)
             return dict(row) if row else None
@@ -225,7 +225,7 @@ class Database(AbstractDatabase):
         """
 
         all_params = join_params + conditions_params + [limit, offset]
-        sql, params = self._prepare(query, all_params)
+        sql, params = self.prepare(query, all_params)
 
         async with self._acquire_pool() as conn:
             rows = await conn.fetch(sql, *params)
@@ -243,7 +243,7 @@ class Database(AbstractDatabase):
         """
 
         all_params = join_params + conditions_params
-        sql, params = self._prepare(query, all_params)
+        sql, params = self.prepare(query, all_params)
 
         async with self._acquire_pool() as conn:
             row = await conn.fetchrow(sql, *params)
@@ -260,7 +260,7 @@ class Database(AbstractDatabase):
                     tr = conn.transaction()
                     await tr.start()
                     try:
-                        query, params = self._prepare(query, params)
+                        query, params = self.prepare(query, params)
                         result = await conn.execute(query, *params)
                         await tr.commit()
                         return Response(
@@ -292,7 +292,7 @@ class Database(AbstractDatabase):
                     else:
                         continue
 
-                    query, args = self._prepare(query, args)
+                    query, args = self.prepare(query, args)
 
                     result = await conn.execute(query, *args)
                     # asyncpg returns "INSERT 0 1" or "UPDATE 3" etc.
@@ -315,7 +315,7 @@ class Database(AbstractDatabase):
             {conditions_stmt}
         """
 
-        query, params = self._prepare(query, params)
+        query, params = self.prepare(query, params)
 
         async with self._acquire_pool() as conn:
             tr = conn.transaction()
@@ -356,7 +356,7 @@ class Database(AbstractDatabase):
                     RETURNING id
                 """
 
-                sql, values = self._prepare(insert_stmt, values)
+                sql, values = self.prepare(insert_stmt, values)
 
                 row = await conn.fetchrow(sql, *values)
 
@@ -420,7 +420,7 @@ class Database(AbstractDatabase):
 
                 update_values = list(update_columns.values()) + params
 
-                sql, values = self._prepare(update_stmt, update_values)
+                sql, values = self.prepare(update_stmt, update_values)
 
                 row = await conn.fetchrow(sql, *values)
 
@@ -502,7 +502,7 @@ class Database(AbstractDatabase):
                 RETURNING *
             """
 
-            sql, values = self._prepare(sql, list(insert_data.values()))
+            sql, values = self.prepare(sql, list(insert_data.values()))
 
             async with self._acquire_pool() as conn:
                 async with conn.transaction():
