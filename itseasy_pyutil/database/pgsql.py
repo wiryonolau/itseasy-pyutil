@@ -8,14 +8,9 @@ import asyncpg
 
 from itseasy_pyutil import get_logger, list_get
 from itseasy_pyutil.database import (
-    ORDER_PATTERN,
-    SAFE_IDENTIFIER,
-    SAFE_IDENTIFIER_WITH_STAR,
     AbstractDatabase,
     Condition,
     ConditionSet,
-    Expression,
-    Filter,
     Response,
 )
 
@@ -85,6 +80,9 @@ class Database(AbstractDatabase):
             **self._db_config,
         )
 
+    # -----------------------------
+    # Deprecated compatibility APIs
+    # -----------------------------
     async def get_connection(self):
         """
         Acquire a connection from the pool.
@@ -158,34 +156,36 @@ class Database(AbstractDatabase):
         Yields the connection for executing queries.
         """
         async with self._acquire_pool() as conn:
-            tr = conn.transaction()
-            await tr.start()  # BEGIN
             try:
-                yield conn
-                await tr.commit()  # COMMIT
+                async with conn.transaction():
+                    yield conn
             except Exception:
-                await tr.rollback()  # ROLLBACK
                 raise
 
-    async def get_rows(self, query, params=()):
+    @asynccontextmanager
+    async def _get_connection(self, conn=None):
+        if conn is not None:
+            # We do NOT own this connection
+            yield conn
+        else:
+            # We DO own this connection
+            async with self._get_connection(conn=conn) as c:
+                yield c
+
+    async def get_rows(self, query, params=(), conn=None):
         sql, params = self.prepare(query, params)
-        async with self._acquire_pool() as conn:
+        async with self._get_connection(conn=conn) as conn:
             rows = await conn.fetch(sql, *params)
             return [dict(r) for r in rows]
 
-    async def get_row(self, query, params=()):
+    async def get_row(self, query, params=(), conn=None):
         sql, params = self.prepare(query, params)
-        async with self._acquire_pool() as conn:
+        async with self._get_connection(conn=conn) as conn:
             row = await conn.fetchrow(sql, *params)
             return dict(row) if row else None
 
     async def get_filter_row(
-        self,
-        table,
-        columns=[],
-        joins=[],
-        conditions=[],
-        orders=[],
+        self, table, columns=[], joins=[], conditions=[], orders=[], conn=None
     ):
         response = await self.get_filter_rows(
             table=table,
@@ -195,6 +195,7 @@ class Database(AbstractDatabase):
             conditions=conditions,
             offset=0,
             limit=1,
+            conn=conn,
         )
 
         return list_get(response, 0, None)
@@ -208,6 +209,7 @@ class Database(AbstractDatabase):
         orders=[],
         offset=0,
         limit=1000,
+        conn=None,
     ):
         join_stmt, join_params = self.parse_joins(joins)
         conditions_stmt, conditions_params = self.parse_conditions(conditions)
@@ -230,11 +232,13 @@ class Database(AbstractDatabase):
         all_params = join_params + conditions_params + [limit, offset]
         sql, params = self.prepare(query, all_params)
 
-        async with self._acquire_pool() as conn:
+        async with self._get_connection(conn=conn) as conn:
             rows = await conn.fetch(sql, *params)
             return [dict(r) for r in rows]
 
-    async def get_count(self, table, index=None, joins=[], conditions=[]):
+    async def get_count(
+        self, table, index=None, joins=[], conditions=[], conn=None
+    ):
         join_stmt, join_params = self.parse_joins(joins)
         conditions_stmt, conditions_params = self.parse_conditions(conditions)
 
@@ -248,69 +252,69 @@ class Database(AbstractDatabase):
         all_params = join_params + conditions_params
         sql, params = self.prepare(query, all_params)
 
-        async with self._acquire_pool() as conn:
+        async with self._get_connection(conn=conn) as conn:
             row = await conn.fetchrow(sql, *params)
             row = dict(row) if row else {}
             return row.get("total", 0)
 
-    async def execute(self, query, params=(), return_result: bool = False):
+    async def execute(
+        self, query, params=(), return_result: bool = False, conn=None
+    ):
         try:
-            async with self._acquire_pool() as conn:
+            async with self._get_connection(conn) as conn:
+                query, params = self.prepare(query, params)
+
                 if return_result:
-                    rows = await conn.fetch(query, *params)
-                    return rows
-                else:
-                    tr = conn.transaction()
-                    await tr.start()
-                    try:
-                        query, params = self.prepare(query, params)
-                        result = await conn.execute(query, *params)
-                        await tr.commit()
-                        return Response(
-                            success=True, lastrowid=None, error=None
-                        )
-                    except Exception as e:
-                        await tr.rollback()
-                        return Response(
-                            success=False, lastrowid=None, error=str(e)
-                        )
+                    return await conn.fetch(query, *params)
+
+                async with conn.transaction():
+                    await conn.execute(query, *params)
+
+                return Response(success=True, lastrowid=None, error=None)
+
         except Exception as e:
+            if conn is not None:
+                raise
+
             return Response(success=False, lastrowid=None, error=str(e))
 
-    async def execute_many(self, statements=[]):
+    async def execute_many(self, statements=[], conn=None):
         """
         statements: list of (query,) or (query, params)
         """
         affected_rows = 0
-        async with self._acquire_pool() as conn:
-            tr = conn.transaction()
-            await tr.start()
-            try:
-                for stmt in statements:
-                    args = []
-                    if len(stmt) == 1:
-                        query = stmt[0]
-                    elif len(stmt) == 2:
-                        query, args = stmt
-                    else:
-                        continue
+        try:
+            async with self._get_connection(conn) as conn:
+                async with conn.transaction():
 
-                    query, args = self.prepare(query, args)
+                    for stmt in statements:
+                        args = []
+                        if len(stmt) == 1:
+                            query = stmt[0]
+                        elif len(stmt) == 2:
+                            query, args = stmt
+                        else:
+                            continue
 
-                    result = await conn.execute(query, *args)
-                    # asyncpg returns "INSERT 0 1" or "UPDATE 3" etc.
-                    affected_rows += int(result.split()[-1])
+                        query, args = self.prepare(query, args)
+                        result = await conn.execute(query, *args)
 
-                await tr.commit()
+                        affected_rows += int(result.split()[-1])
+
                 return Response(
-                    success=affected_rows > 0, lastrowid=None, error=None
+                    success=affected_rows > 0,
+                    lastrowid=None,
+                    error=None,
                 )
-            except Exception as e:
-                await tr.rollback()
-                self._logger.info(sys.exc_info())
-                return Response(success=False, lastrowid=None, error=str(e))
+        except Exception as e:
+            self._logger.info(sys.exc_info())
 
-    async def delete(self, table, conditions=[]):
+            if conn is not None:
+                raise
+
+            return Response(success=False, lastrowid=None, error=str(e))
+
+    async def delete(self, table, conditions=[], conn=None):
         conditions_stmt, params = self.parse_conditions(conditions)
 
         query = f"""
@@ -320,50 +324,47 @@ class Database(AbstractDatabase):
 
         query, params = self.prepare(query, params)
 
-        async with self._acquire_pool() as conn:
-            tr = conn.transaction()
-            await tr.start()
-            try:
-                result = await conn.execute(query, *params)
-                await tr.commit()
+        try:
+            async with self._get_connection(conn) as conn:
+                async with conn.transaction():
+                    result = await conn.execute(query, *params)
+
                 affected = int(result.split()[-1])
                 return Response(
                     success=affected > 0, lastrowid=None, error=None
                 )
-            except Exception as e:
-                await tr.rollback()
-                self._logger.info(sys.exc_info())
-                return Response(success=False, lastrowid=None, error=str(e))
 
-    async def insert(self, table, column_values={}):
-        """
-        Insert without condition check (asyncpg version)
-        """
-        async with self._acquire_pool() as conn:
-            tr = conn.transaction()
-            await tr.start()  # BEGIN
+        except Exception as e:
+            self._logger.info(sys.exc_info())
 
+            if conn is not None:
+                raise
+
+            return Response(success=False, lastrowid=None, error=str(e))
+
+    async def insert(self, table, column_values={}, conn=None):
+        async with self._get_connection(conn) as conn:
             try:
-                # Build columns and values for INSERT
-                columns = [
-                    self.sanitize_identifier(c, allow_star=True)
-                    for c in column_values.keys()
-                ]
-                columns = ",".join(columns)
-                values = list(column_values.values())
+                async with conn.transaction():
 
-                insert_stmt = f"""
-                    INSERT INTO {self.sanitize_identifier(table)}
-                    ({columns})
-                    VALUES ({", ".join(["%s"] * len(values))})
-                    RETURNING id
-                """
+                    # Build columns and values for INSERT
+                    columns = [
+                        self.sanitize_identifier(c, allow_star=True)
+                        for c in column_values.keys()
+                    ]
+                    columns = ",".join(columns)
+                    values = list(column_values.values())
 
-                sql, values = self.prepare(insert_stmt, values)
+                    insert_stmt = f"""
+                        INSERT INTO {self.sanitize_identifier(table)}
+                        ({columns})
+                        VALUES ({", ".join(["%s"] * len(values))})
+                        RETURNING id
+                    """
 
-                row = await conn.fetchrow(sql, *values)
+                    sql, values = self.prepare(insert_stmt, values)
 
-                await tr.commit()  # COMMIT
+                    row = await conn.fetchrow(sql, *values)
 
                 return Response(
                     success=True,
@@ -373,7 +374,9 @@ class Database(AbstractDatabase):
 
             except Exception as e:
                 self._logger.debug(f"Transaction failed: {sys.exc_info()}")
-                await tr.rollback()  # ROLLBACK
+
+                if conn is not None:
+                    raise
 
                 return Response(
                     success=False,
@@ -382,52 +385,48 @@ class Database(AbstractDatabase):
                 )
 
     async def update(
-        self, table, identifiers=[], column_values={}, conditions=[]
+        self, table, identifiers=[], column_values={}, conditions=[], conn=None
     ):
-        async with self._acquire_pool() as conn:
-            tr = conn.transaction()
-            await tr.start()  # BEGIN
+        try:
+            async with self._get_connection(conn) as conn:
+                async with conn.transaction():
 
-            try:
-                # Build identifier-based conditions
-                condition_by_identifier = []
-                for col in identifiers:
-                    condition_by_identifier.append(
-                        Condition(column=col, value=column_values.get(col))
+                    # Build identifier-based conditions
+                    condition_by_identifier = []
+                    for col in identifiers:
+                        condition_by_identifier.append(
+                            Condition(column=col, value=column_values.get(col))
+                        )
+
+                    conditions = condition_by_identifier + [
+                        ConditionSet(conditions=conditions)
+                    ]
+
+                    where_clause, params = self.parse_conditions(conditions)
+
+                    # Columns to update (exclude identifiers)
+                    update_columns = {
+                        key: value
+                        for key, value in column_values.items()
+                        if key not in identifiers
+                    }
+
+                    set_clause = ", ".join(
+                        f"{self.sanitize_identifier(col)}=%s"
+                        for col in update_columns
                     )
 
-                conditions = condition_by_identifier + [
-                    ConditionSet(conditions=conditions)
-                ]
+                    update_stmt = f"""
+                        UPDATE {self.sanitize_identifier(table)}
+                        SET {set_clause}
+                        {where_clause}
+                        RETURNING 1
+                    """
 
-                where_clause, params = self.parse_conditions(conditions)
+                    update_values = list(update_columns.values()) + params
+                    sql, values = self.prepare(update_stmt, update_values)
 
-                # Columns to update (exclude identifiers)
-                update_columns = {
-                    key: value
-                    for key, value in column_values.items()
-                    if key not in identifiers
-                }
-
-                set_clause = ", ".join(
-                    f"{self.sanitize_identifier(col)}=%s"
-                    for col in update_columns
-                )
-
-                update_stmt = f"""
-                    UPDATE {self.sanitize_identifier(table)}
-                    SET {set_clause}
-                    {where_clause}
-                    RETURNING 1
-                """
-
-                update_values = list(update_columns.values()) + params
-
-                sql, values = self.prepare(update_stmt, update_values)
-
-                row = await conn.fetchrow(sql, *values)
-
-                await tr.commit()  # COMMIT
+                    row = await conn.fetchrow(sql, *values)
 
                 return Response(
                     success=bool(row),
@@ -435,32 +434,22 @@ class Database(AbstractDatabase):
                     error=None,
                 )
 
-            except Exception as e:
-                self._logger.debug(f"Transaction failed: {sys.exc_info()}")
-                await tr.rollback()  # ROLLBACK
+        except Exception as e:
+            self._logger.debug(f"Transaction failed: {sys.exc_info()}")
 
-                return Response(
-                    success=False,
-                    lastrowid=None,
-                    error=str(e),
-                )
+            # CRITICAL PART: do not swallow inside tx()
+            if conn is not None:
+                raise
+
+            return Response(
+                success=False,
+                lastrowid=None,
+                error=str(e),
+            )
 
     async def upsert(
-        self,
-        table,
-        identifiers,
-        column_values,
-        has_auto_id="id",
+        self, table, identifiers, column_values, has_auto_id="id", conn=None
     ):
-        """
-        PostgreSQL UPSERT
-        - Identity-safe
-        - Never emits invalid ON CONFLICT
-        - Never conflicts on missing values
-        - Always returns full row
-        - Never raises DB errors to caller
-        """
-
         try:
             # ------------------------------------------------------------
             # 1️⃣ Build INSERT data (omit auto id when None)
@@ -475,8 +464,7 @@ class Database(AbstractDatabase):
                 raise ValueError("Nothing to insert")
 
             # ------------------------------------------------------------
-            # 2️⃣ Sanitize identifiers AND ensure they are usable
-            #     (must exist in insert_data and not be None)
+            # 2️⃣ Sanitize identifiers
             # ------------------------------------------------------------
             identifiers = [
                 c
@@ -491,7 +479,6 @@ class Database(AbstractDatabase):
             placeholders = ["%s"] * len(insert_cols)
             conflict_cols = [self.sanitize_identifier(c) for c in identifiers]
 
-            # Never update conflict keys or auto id
             update_cols = [
                 c
                 for c in insert_data
@@ -499,7 +486,7 @@ class Database(AbstractDatabase):
             ]
 
             # ------------------------------------------------------------
-            # 4️⃣ Build conflict clause safely
+            # 4️⃣ Conflict clause
             # ------------------------------------------------------------
             if conflict_cols:
                 if update_cols:
@@ -532,12 +519,15 @@ class Database(AbstractDatabase):
 
             sql, values = self.prepare(sql, list(insert_data.values()))
 
-            async with self._acquire_pool() as conn:
+            # ------------------------------------------------------------
+            # 6️⃣ Execute safely
+            # ------------------------------------------------------------
+            async with self._get_connection(conn) as conn:
                 async with conn.transaction():
                     row = await conn.fetchrow(sql, *values)
 
             # ------------------------------------------------------------
-            # 6️⃣ Success response
+            # 7️⃣ Success response
             # ------------------------------------------------------------
             fields = list(row.keys()) + ["error"]
             UpsertResponse = namedtuple("UpsertResponse", fields)
@@ -545,8 +535,9 @@ class Database(AbstractDatabase):
             return UpsertResponse(**row, error=None)
 
         except Exception as exc:
-            # ------------------------------------------------------------
-            # 7️⃣ Failure response (NO RETHROW)
-            # ------------------------------------------------------------
+            # IMPORTANT: if inside tx, re-raise
+            if conn is not None:
+                raise
+
             UpsertResponse = namedtuple("UpsertResponse", ["error"])
             return UpsertResponse(error=str(exc))
