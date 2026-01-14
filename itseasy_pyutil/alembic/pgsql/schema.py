@@ -3,6 +3,7 @@ import re
 from sqlalchemy import (
     BigInteger,
     DateTime,
+    Enum,
     ForeignKeyConstraint,
     Integer,
     MetaData,
@@ -40,21 +41,30 @@ def normalize_sa_type(sa_type):
     if sa_type is None:
         return None
 
-    # Detect timezone if DateTime
-    if (
-        hasattr(sa_type, "timezone")
-        and sa_type.__class__.__name__.lower() == "datetime"
-    ):
-        if sa_type.timezone:
-            return "timestamp with time zone"
-        else:
-            return "timestamp without time zone"
+    # --- SQLAlchemy DateTime object ---
+    if isinstance(sa_type, DateTime):
+        return (
+            "timestamp with time zone"
+            if getattr(sa_type, "timezone", False)
+            else "timestamp without time zone"
+        )
 
-    t = str(sa_type).lower()
-    if "(" in t:
-        t = t.split("(")[0]
+    # --- SQLAlchemy type object fallback ---
+    if hasattr(sa_type, "__class__") and not isinstance(sa_type, str):
+        sa_type = sa_type.__class__.__name__
+
+    # --- String normalization ---
+    t = str(sa_type).lower().strip()
+
+    # remove parameters like varchar(255)
+    t = re.sub(r"\(.*?\)", "", t)
 
     mapping = {
+        "datetime": "timestamp without time zone",  # default if tz unknown
+        "timestamptz": "timestamp with time zone",
+        "timestamp with time zone": "timestamp with time zone",
+        "timestamp without time zone": "timestamp without time zone",
+        "timestamp": "timestamp without time zone",
         "integer": "integer",
         "smallinteger": "smallint",
         "biginteger": "bigint",
@@ -65,7 +75,6 @@ def normalize_sa_type(sa_type):
         "text": "text",
         "float": "double precision",
         "numeric": "numeric",
-        "timestamp": "timestamp without time zone",
         "date": "date",
         "time": "time without time zone",
         "json": "jsonb",
@@ -96,7 +105,7 @@ def column_info(connection, table_name, column_name):
         ).fetchone()
         is_identity = seq_res[0] == "YES" if seq_res else False
         return (
-            str(col["type"]),
+            col["type"],
             str(col["type"]),
             "yes" if col["nullable"] else "no",
             normalize_default_value(col.get("default")),
@@ -136,14 +145,8 @@ def column_has_update(existing, new):
     ) = new
 
     # ---------- Normalize types ----------
-    # Encode timezone into string for new_type if DateTime
-    existing_type_str = str(existing_type).lower()
-    new_type_str = str(new_type).lower()
-
-    # If you can detect timezone from the new_type string, append "with time zone" (or pass here if you already encoded)
-    # Otherwise leave as-is for backward compatibility
-    existing_type_norm = normalize_sa_type(existing_type_str)
-    new_type_norm = normalize_sa_type(new_type_str)
+    existing_type_norm = normalize_sa_type(existing_type)
+    new_type_norm = normalize_sa_type(new_type)
 
     # ---------- Normalize nullable ----------
     existing_nullable = boolval(existing_nullable)
@@ -398,7 +401,8 @@ def update_column_if_needed(
     Only removes FKs if column changes.
     """
     new_col_type = compute_column_type(column_obj)
-    new_type = type(column_obj.type).__name__
+    new_type = column_obj.type
+    # new_type = type(column_obj.type).__name__
     new_nullable = "yes" if column_obj.nullable else "no"
     new_default = normalize_default_value(
         column_obj.default or column_obj.server_default
@@ -414,7 +418,7 @@ def update_column_if_needed(
     )
 
     enum_class = None
-    if new_type.lower() == "enum":
+    if isinstance(column_obj.type, Enum):
         enum_class = getattr(column_obj.type, "enum_class")
         new_col_type = f"{table_name}_{column_name}_enum"
 

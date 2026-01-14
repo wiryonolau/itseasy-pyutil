@@ -165,12 +165,14 @@ class Database(AbstractDatabase):
     @asynccontextmanager
     async def _get_connection(self, conn=None):
         if conn is not None:
-            # We do NOT own this connection
             yield conn
-        else:
-            # We DO own this connection
-            async with self._get_connection(conn=conn) as c:
-                yield c
+            return
+
+        if not self._pool:
+            await self.connect()
+
+        async with self._acquire_pool() as c:
+            yield c
 
     async def get_rows(self, query, params=(), conn=None):
         sql, params = self.prepare(query, params)
