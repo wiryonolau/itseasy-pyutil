@@ -159,6 +159,45 @@ class AbstractDatabase(abc.ABC):
 
         return identifier
 
+    def cast_value(self, col_type, value):
+        if value is None:
+            return None
+
+        if col_type in ("timestamp", "timestamptz", "datetime"):
+            dt = (
+                datetime.fromisoformat(value)
+                if isinstance(value, str)
+                else value
+            )
+            if col_type == "timestamptz" and dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt
+
+        if col_type == "date":
+            return (
+                datetime.fromisoformat(value).date()
+                if isinstance(value, str)
+                else value
+            )
+
+        if col_type == "bool":
+            return (
+                value.lower() == "true"
+                if isinstance(value, str)
+                else bool(value)
+            )
+
+        if col_type == "int":
+            return int(value)
+
+        if col_type == "float":
+            return float(value)
+
+        if col_type in ("json", "jsonb"):
+            return json.loads(value) if isinstance(value, str) else value
+
+        return value
+
     def filter_to_conditions(self, filters=[], mapping={}, column_types={}):
         """
         Convert frontend filters to Condition objects.
@@ -168,6 +207,7 @@ class AbstractDatabase(abc.ABC):
             mapping: dict mapping frontend field id → DB column
             column_types: dict mapping column_name → type (e.g., 'int', 'bool', 'timestamp', 'timestamptz', 'json')
         """
+
         conditions = []
 
         for f in filters:
@@ -227,34 +267,12 @@ class AbstractDatabase(abc.ABC):
 
                 # Convert value based on column type
                 col_type = column_types.get(obj.id)
+
                 if col_type and value is not None:
-                    if col_type in ("timestamp", "timestamptz"):
-                        dt = (
-                            datetime.fromisoformat(value)
-                            if isinstance(value, str)
-                            else value
-                        )
-                        if col_type == "timestamptz" and dt.tzinfo is None:
-                            dt = dt.replace(tzinfo=timezone.utc)
-                        value = dt
-                    elif col_type == "date":
-                        value = (
-                            datetime.fromisoformat(value).date()
-                            if isinstance(value, str)
-                            else value
-                        )
-                    elif col_type == "bool":
-                        if isinstance(value, str):
-                            value = value.lower() == "true"
-                    elif col_type == "int":
-                        value = int(value) if isinstance(value, str) else value
-                    elif col_type == "float":
-                        value = (
-                            float(value) if isinstance(value, str) else value
-                        )
-                    elif col_type in ("json", "jsonb"):
-                        if isinstance(value, str):
-                            value = json.loads(value)
+                    if isinstance(value, (list, tuple)):
+                        value = [self.cast_value(col_type, v) for v in value]
+                    else:
+                        value = self.cast_value(col_type, value)
 
                 column = mapping.get(obj.id, obj.id)
                 conditions.append(
