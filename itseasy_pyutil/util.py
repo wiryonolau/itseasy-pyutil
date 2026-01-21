@@ -441,24 +441,38 @@ def count_decimals(value):
     return 0
 
 
+import datetime
+import dateutil.parser
+
+
 def normalize_datetime(value) -> datetime.datetime:
     if value is None:
         return value
 
     if isinstance(value, int):
-        # Assuming milliseconds since epoch
-        dt = datetime.datetime.utcfromtimestamp(value / 1000)
+        # Detect unit based on magnitude
+        if value > 1e15:  # microseconds
+            ts = value / 1_000_000
+        elif value > 1e12:  # milliseconds
+            ts = value / 1_000
+        else:  # seconds
+            ts = value
+
+        dt = datetime.datetime.fromtimestamp(ts, tz=datetime.timezone.utc)
+
     elif isinstance(value, str):
         try:
             dt = dateutil.parser.parse(value)
         except Exception:
             raise ValueError(f"Unrecognized datetime string: {value}")
+
     elif isinstance(value, datetime.datetime):
         dt = value
+
     else:
         raise ValueError("Invalid datetime format.")
 
-    # Force timezone to UTC
+    # Normalize to UTC
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=datetime.timezone.utc)
     else:
