@@ -344,7 +344,7 @@ class Database(AbstractDatabase):
 
             return Response(success=False, lastrowid=None, error=str(e))
 
-    async def insert(self, table, column_values={}, conn=None):
+    async def insert(self, table, column_values={}, identifier="id", conn=None):
         async with self._get_connection(conn) as conn:
             try:
                 async with conn.transaction():
@@ -361,7 +361,7 @@ class Database(AbstractDatabase):
                         INSERT INTO {self.sanitize_identifier(table)}
                         ({columns})
                         VALUES ({", ".join(["%s"] * len(values))})
-                        RETURNING id
+                        RETURNING *
                     """
 
                     sql, values = self.prepare(insert_stmt, values)
@@ -370,7 +370,7 @@ class Database(AbstractDatabase):
 
                 return Response(
                     success=True,
-                    lastrowid=row["id"] if row else None,
+                    lastrowid=row[identifier] if row else None,
                     error=None,
                 )
 

@@ -62,6 +62,20 @@ def get_logger(name: str) -> logging.Logger:
     return logging.getLogger(f"app.{name}")
 
 
+def get_module(index: int = -1, default: str = "unknown") -> str:
+    frame = sys._getframe(1)  # caller
+    module = frame.f_globals.get("__package__")
+
+    if not module:
+        return default
+
+    parts = module.split(".")
+    try:
+        return parts[index]
+    except IndexError:
+        return default
+
+
 def intval(val: str) -> int:
     try:
         return int("".join([n for n in val if n.isdigit()]))

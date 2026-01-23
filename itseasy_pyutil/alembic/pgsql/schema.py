@@ -15,6 +15,7 @@ from sqlalchemy import (
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.sql.elements import TextClause
 from sqlalchemy.sql.schema import DefaultClause, ScalarElementColumnDefault
+from sqlalchemy.dialects.postgresql import ARRAY as PG_ARRAY
 
 from itseasy_pyutil.util import boolval
 
@@ -29,6 +30,8 @@ def normalize_default_value(default_value):
         default_value = default_value.arg
     if isinstance(default_value, TextClause):
         return str(default_value)
+    if isinstance(default_value, (list, tuple)):
+        return f"ARRAY[{', '.join(map(str, default_value))}]"
     if isinstance(default_value, bool):
         return "TRUE" if default_value else "FALSE"
     if isinstance(default_value, str):
@@ -48,6 +51,11 @@ def normalize_sa_type(sa_type):
             if getattr(sa_type, "timezone", False)
             else "timestamp without time zone"
         )
+
+    # --- PostgreSQL ARRAY support ---
+    if isinstance(sa_type, PG_ARRAY):
+        inner = normalize_sa_type(sa_type.item_type)
+        return f"{inner}[]"
 
     # --- SQLAlchemy type object fallback ---
     if hasattr(sa_type, "__class__") and not isinstance(sa_type, str):
@@ -77,7 +85,7 @@ def normalize_sa_type(sa_type):
         "numeric": "numeric",
         "date": "date",
         "time": "time without time zone",
-        "json": "jsonb",
+        "json": "json",
         "jsonb": "jsonb",
         "largebinary": "bytea",
         "bytea": "bytea",
@@ -316,17 +324,27 @@ def modify_column_if_needed(connection, table_name, column_name, column_obj):
 
 def compute_column_type(column_obj):
     """Return PostgreSQL type string including timezone if needed."""
-    col_type_name = type(column_obj.type).__name__
-    if col_type_name.lower() == "enum":
-        return None  # will handle enum separately
-    elif isinstance(column_obj.type, DateTime):
+    col_type = column_obj.type
+
+    # --- ENUM stays special ---
+    if type(col_type).__name__.lower() == "enum":
+        return None  # handled separately
+
+    # --- ARRAY support (new) ---
+    if isinstance(col_type, PG_ARRAY):
+        inner = normalize_sa_type(col_type.item_type)
+        return f"{inner}[]"
+
+    # --- DateTime ---
+    if isinstance(col_type, DateTime):
         return (
             "timestamp with time zone"
-            if getattr(column_obj.type, "timezone", False)
+            if getattr(col_type, "timezone", False)
             else "timestamp without time zone"
         )
-    else:
-        return normalize_sa_type(col_type_name)
+
+    # --- Everything else (existing behavior) ---
+    return normalize_sa_type(type(col_type).__name__)
 
 
 def create_column_if_missing(connection, table_name, column_name, column_obj):
@@ -355,6 +373,10 @@ def create_column_if_missing(connection, table_name, column_name, column_obj):
         $$;
         """
         connection.execute(text(sql))
+    # For Array
+    if isinstance(column_obj.type, PG_ARRAY):
+        inner = normalize_sa_type(column_obj.type.item_type)
+        new_col_type = f"{inner}[]"
 
     # Build type SQL
     col_type_sql = new_col_type
@@ -460,6 +482,11 @@ def update_column_if_needed(
                     sql = f"ALTER TYPE \"{new_col_type}\" ADD VALUE IF NOT EXISTS '{val.value}'"
                     print("SQL:", sql)
                     connection.execute(text(sql))
+
+        # For ARRAY
+        if isinstance(column_obj.type, PG_ARRAY):
+            inner = normalize_sa_type(column_obj.type.item_type)
+            new_col_type = f"{inner}[]"
 
         # ALTER TYPE
         col_type_sql = new_col_type
@@ -572,9 +599,7 @@ def sync_primary_keys(connection, metadata):
             continue
 
         if existing_cols and existing_name:
-            sql = (
-                f'ALTER TABLE "{table_name}" DROP CONSTRAINT "{existing_name}"'
-            )
+            sql = f'ALTER TABLE "{table_name}" DROP CONSTRAINT IF EXISTS "{existing_name}"'
             print(f"[PK][DROP] {sql}")
             connection.execute(text(sql))
 
@@ -746,6 +771,7 @@ def sync_foreign_keys(connection, metadata, schema="public"):
                     f'ALTER TABLE "{schema}"."{table_name}" '
                     f'ADD CONSTRAINT "{name}" FOREIGN KEY ({local_cols}) '
                     f'REFERENCES "{schema}"."{ref_table}" ({remote_cols})'
+                    f"DEFERRABLE INITIALLY IMMEDIATE"
                 )
                 print(f"[FK][ADD] {sql}")
                 connection.execute(text(sql))
