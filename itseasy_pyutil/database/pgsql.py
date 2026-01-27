@@ -450,11 +450,16 @@ class Database(AbstractDatabase):
             )
 
     async def upsert(
-        self, table, identifiers, column_values, has_auto_id="id", conn=None
+        self,
+        table: str,
+        identifiers: list[str],
+        column_values: dict,
+        has_auto_id: str = "id",
+        conn=None,
     ):
         try:
             # ------------------------------------------------------------
-            # 1️⃣ Build INSERT data (omit auto id when None)
+            # 1️⃣ Remove auto id if None (allow DB to generate)
             # ------------------------------------------------------------
             insert_data = {
                 k: v
@@ -463,81 +468,90 @@ class Database(AbstractDatabase):
             }
 
             if not insert_data:
-                raise ValueError("Nothing to insert")
+                raise ValueError("No data to upsert")
 
             # ------------------------------------------------------------
-            # 2️⃣ Sanitize identifiers
+            # 2️⃣ Conflict keys come from ORIGINAL payload, not insert_data
             # ------------------------------------------------------------
-            identifiers = [
+            conflict_keys = [
                 c
                 for c in identifiers
-                if c in insert_data and insert_data[c] is not None
+                if c in column_values and column_values[c] is not None
             ]
 
-            # ------------------------------------------------------------
-            # 3️⃣ SQL parts
-            # ------------------------------------------------------------
-            insert_cols = [self.sanitize_identifier(c) for c in insert_data]
-            placeholders = ["%s"] * len(insert_cols)
-            conflict_cols = [self.sanitize_identifier(c) for c in identifiers]
-
-            update_cols = [
-                c
-                for c in insert_data
-                if c not in identifiers and c != has_auto_id
-            ]
+            use_upsert = bool(conflict_keys)
 
             # ------------------------------------------------------------
-            # 4️⃣ Conflict clause
+            # 3️⃣ Build SQL components
             # ------------------------------------------------------------
-            if conflict_cols:
+            cols = list(insert_data.keys())
+            values = list(insert_data.values())
+
+            safe_table = self.sanitize_identifier(table)
+            safe_cols = [self.sanitize_identifier(c) for c in cols]
+            placeholders = [f"${i}" for i in range(1, len(cols) + 1)]
+
+            # ------------------------------------------------------------
+            # 4️⃣ Build SQL
+            # ------------------------------------------------------------
+            if use_upsert:
+                safe_conflicts = [
+                    self.sanitize_identifier(c) for c in conflict_keys
+                ]
+
+                update_cols = [c for c in cols if c not in conflict_keys]
+
                 if update_cols:
                     update_clause = ", ".join(
                         f"{self.sanitize_identifier(c)} = EXCLUDED.{self.sanitize_identifier(c)}"
                         for c in update_cols
                     )
-                    conflict_action = f"""
-                        ON CONFLICT ({", ".join(conflict_cols)})
-                        DO UPDATE SET {update_clause}
-                    """
                 else:
-                    conflict_action = f"""
-                        ON CONFLICT ({", ".join(conflict_cols)})
-                        DO NOTHING
-                    """
+                    # Composite-safe no-op update
+                    noop = self.sanitize_identifier(conflict_keys[0])
+                    update_clause = f"{noop} = {safe_table}.{noop}"
+
+                sql = f"""
+                    INSERT INTO {safe_table}
+                        ({", ".join(safe_cols)})
+                    VALUES
+                        ({", ".join(placeholders)})
+                    ON CONFLICT ({", ".join(safe_conflicts)})
+                    DO UPDATE SET
+                        {update_clause}
+                    RETURNING *,
+                            (xmax = 0) AS inserted
+                """
             else:
-                conflict_action = ""
+                # Fallback: pure insert
+                sql = f"""
+                    INSERT INTO {safe_table}
+                        ({", ".join(safe_cols)})
+                    VALUES
+                        ({", ".join(placeholders)})
+                    RETURNING *, true AS inserted
+                """
 
             # ------------------------------------------------------------
-            # 5️⃣ Final SQL
-            # ------------------------------------------------------------
-            sql = f"""
-                INSERT INTO {self.sanitize_identifier(table)}
-                ({", ".join(insert_cols)})
-                VALUES ({", ".join(placeholders)})
-                {conflict_action}
-                RETURNING *
-            """
-
-            sql, values = self.prepare(sql, list(insert_data.values()))
-
-            # ------------------------------------------------------------
-            # 6️⃣ Execute safely
+            # 5️⃣ Execute
             # ------------------------------------------------------------
             async with self._get_connection(conn) as conn:
                 async with conn.transaction():
                     row = await conn.fetchrow(sql, *values)
 
-            # ------------------------------------------------------------
-            # 7️⃣ Success response
-            # ------------------------------------------------------------
-            fields = list(row.keys()) + ["error"]
-            UpsertResponse = namedtuple("UpsertResponse", fields)
+            if row is None:
+                raise RuntimeError("Insert/Upsert failed: no row returned")
 
-            return UpsertResponse(**row, error=None)
+            # ------------------------------------------------------------
+            # 6️⃣ Return response
+            # ------------------------------------------------------------
+            data = dict(row)
+            data["error"] = None
+
+            UpsertResponse = namedtuple("UpsertResponse", data.keys())
+            return UpsertResponse(**data)
 
         except Exception as exc:
-            # IMPORTANT: if inside tx, re-raise
             if conn is not None:
                 raise
 

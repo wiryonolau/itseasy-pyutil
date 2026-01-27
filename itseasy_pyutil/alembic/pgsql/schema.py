@@ -21,7 +21,7 @@ from itseasy_pyutil.util import boolval
 
 
 # ---------- Normalize default ----------
-def normalize_default_value(default_value):
+def normalize_default_value(default_value, column_type=None):
     if default_value is None:
         return None
     if isinstance(default_value, ScalarElementColumnDefault):
@@ -31,6 +31,8 @@ def normalize_default_value(default_value):
     if isinstance(default_value, TextClause):
         return str(default_value)
     if isinstance(default_value, (list, tuple)):
+        if not default_value:
+            return f"ARRAY[]::{column_type}[]"
         return f"ARRAY[{', '.join(map(str, default_value))}]"
     if isinstance(default_value, bool):
         return "TRUE" if default_value else "FALSE"
