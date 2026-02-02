@@ -103,11 +103,12 @@ class Join(NamedTuple):
 
 class Response(NamedTuple):
     """
-    Response for sql other then SELECT
+    Response for sql other than SELECT
     """
 
     success: bool
     lastrowid: Optional[int]
+    data: Optional[Dict[str, Any]]
     error: Optional[str]
 
 

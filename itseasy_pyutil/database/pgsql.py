@@ -387,18 +387,27 @@ class Database(AbstractDatabase):
                 )
 
     async def update(
-        self, table, identifiers=[], column_values={}, conditions=[], conn=None
+        self,
+        table,
+        identifiers=None,
+        column_values=None,
+        conditions=None,
+        identity_column="id",
+        conn=None,
     ):
+        identifiers = identifiers or []
+        column_values = column_values or {}
+        conditions = conditions or []
+
         try:
             async with self._get_connection(conn) as conn:
                 async with conn.transaction():
 
                     # Build identifier-based conditions
-                    condition_by_identifier = []
-                    for col in identifiers:
-                        condition_by_identifier.append(
-                            Condition(column=col, value=column_values.get(col))
-                        )
+                    condition_by_identifier = [
+                        Condition(column=col, value=column_values.get(col))
+                        for col in identifiers
+                    ]
 
                     conditions = condition_by_identifier + [
                         ConditionSet(conditions=conditions)
@@ -413,8 +422,11 @@ class Database(AbstractDatabase):
                         if key not in identifiers
                     }
 
+                    if not update_columns:
+                        raise ValueError("No columns to update")
+
                     set_clause = ", ".join(
-                        f"{self.sanitize_identifier(col)}=%s"
+                        f"{self.sanitize_identifier(col)} = %s"
                         for col in update_columns
                     )
 
@@ -422,7 +434,7 @@ class Database(AbstractDatabase):
                         UPDATE {self.sanitize_identifier(table)}
                         SET {set_clause}
                         {where_clause}
-                        RETURNING 1
+                        RETURNING *
                     """
 
                     update_values = list(update_columns.values()) + params
@@ -430,22 +442,28 @@ class Database(AbstractDatabase):
 
                     row = await conn.fetchrow(sql, *values)
 
-                return Response(
-                    success=bool(row),
-                    lastrowid=None,
-                    error=None,
-                )
+                    return Response(
+                        success=row is not None,
+                        lastrowid=(
+                            row.get(identity_column)
+                            if row and identity_column
+                            else None
+                        ),
+                        data=dict(row) if row else None,
+                        error=None,
+                    )
 
         except Exception as e:
-            self._logger.debug(f"Transaction failed: {sys.exc_info()}")
+            self._logger.debug("Transaction failed", exc_info=True)
 
-            # CRITICAL PART: do not swallow inside tx()
+            # Do not swallow exceptions inside an outer transaction
             if conn is not None:
                 raise
 
             return Response(
                 success=False,
                 lastrowid=None,
+                data=None,
                 error=str(e),
             )
 
