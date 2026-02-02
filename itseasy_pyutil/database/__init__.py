@@ -6,7 +6,7 @@ import traceback
 from collections import namedtuple
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timezone
-from typing import Any, NamedTuple, Optional
+from typing import Any, NamedTuple, Optional, Dict
 
 from itseasy_pyutil import get_logger, list_get
 
