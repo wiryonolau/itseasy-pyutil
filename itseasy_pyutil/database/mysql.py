@@ -202,6 +202,7 @@ class Database(AbstractDatabase):
                         result = Response(
                             success=True,
                             lastrowid=cursor.lastrowid or None,
+                            data={},
                             error=None,
                         )
 
@@ -214,7 +215,9 @@ class Database(AbstractDatabase):
                     if getattr(conn, "_tx_depth", 0) > 0:
                         raise
 
-                    return Response(False, None, str(e))
+                    return Response(
+                        success=False, lastrowid=None, data={}, error=str(e)
+                    )
 
     async def execute_many(self, statements=[]):
         affected = 0
@@ -234,6 +237,7 @@ class Database(AbstractDatabase):
                     return Response(
                         success=affected > 0,
                         lastrowid=None,
+                        data={},
                         error=None,
                     )
 
@@ -243,7 +247,9 @@ class Database(AbstractDatabase):
                     if getattr(conn, "_tx_depth", 0) > 0:
                         raise
 
-                    return Response(False, None, str(e))
+                    return Response(
+                        success=False, lastrowid=None, data={}, error=str(e)
+                    )
 
     async def delete(self, table, conditions=[]):
         stmt, params = self.parse_conditions(conditions)
@@ -260,6 +266,7 @@ class Database(AbstractDatabase):
                     return Response(
                         success=cursor.rowcount > 0,
                         lastrowid=None,
+                        data={},
                         error=None,
                     )
 
@@ -269,7 +276,9 @@ class Database(AbstractDatabase):
                     if getattr(conn, "_tx_depth", 0) > 0:
                         raise
 
-                    return Response(False, None, str(e))
+                    return Response(
+                        success=False, lastrowid=None, data={}, error=str(e)
+                    )
 
     async def insert(self, table, column_values={}):
         columns = list(column_values.keys())
@@ -291,6 +300,7 @@ class Database(AbstractDatabase):
                     return Response(
                         success=True,
                         lastrowid=cursor.lastrowid or None,
+                        data={},
                         error=None,
                     )
 
@@ -300,7 +310,9 @@ class Database(AbstractDatabase):
                     if getattr(conn, "_tx_depth", 0) > 0:
                         raise
 
-                    return Response(False, None, str(e))
+                    return Response(
+                        success=False, lastrowid=None, data={}, error=str(e)
+                    )
 
     async def update(
         self, table, identifiers=[], column_values={}, conditions=[]
@@ -334,6 +346,7 @@ class Database(AbstractDatabase):
                     return Response(
                         success=cursor.rowcount > 0,
                         lastrowid=None,
+                        data={},
                         error=None,
                     )
 
@@ -343,7 +356,9 @@ class Database(AbstractDatabase):
                     if getattr(conn, "_tx_depth", 0) > 0:
                         raise
 
-                    return Response(False, None, str(e))
+                    return Response(
+                        success=False, lastrowid=None, data={}, error=str(e)
+                    )
 
     async def upsert(
         self, table, identifiers=[], column_values={}, has_auto_id=True

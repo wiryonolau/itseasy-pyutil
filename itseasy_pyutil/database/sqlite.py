@@ -143,10 +143,13 @@ class Database(AbstractDatabase):
                 return Response(
                     success=True,
                     lastrowid=cur.lastrowid,
+                    data={},
                     error=None,
                 )
         except Exception as e:
-            return Response(False, None, str(e))
+            return Response(
+                success=False, lastrowid=None, data={}, error=str(e)
+            )
 
     async def execute_many(self, statements=[]):
         affected = 0
@@ -157,9 +160,11 @@ class Database(AbstractDatabase):
                     cur = await self._conn.execute(query, params)
                     affected += cur.rowcount
 
-            return Response(True, None, None)
+            return Response(success=True, lastrowid=None, data={}, error=None)
         except Exception as e:
-            return Response(False, None, str(e))
+            return Response(
+                success=False, lastrowid=None, data={}, error=str(e)
+            )
 
     # ------------------------------------------------------------------
     # DML

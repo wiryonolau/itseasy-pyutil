@@ -272,13 +272,17 @@ class Database(AbstractDatabase):
                 async with conn.transaction():
                     await conn.execute(query, *params)
 
-                return Response(success=True, lastrowid=None, error=None)
+                return Response(
+                    success=True, lastrowid=None, data={}, error=None
+                )
 
         except Exception as e:
             if conn is not None:
                 raise
 
-            return Response(success=False, lastrowid=None, error=str(e))
+            return Response(
+                success=False, lastrowid=None, data={}, error=str(e)
+            )
 
     async def execute_many(self, statements=[], conn=None):
         """
@@ -306,6 +310,7 @@ class Database(AbstractDatabase):
                 return Response(
                     success=affected_rows > 0,
                     lastrowid=None,
+                    data={},
                     error=None,
                 )
         except Exception as e:
@@ -314,7 +319,9 @@ class Database(AbstractDatabase):
             if conn is not None:
                 raise
 
-            return Response(success=False, lastrowid=None, error=str(e))
+            return Response(
+                success=False, lastrowid=None, data={}, error=str(e)
+            )
 
     async def delete(self, table, conditions=[], conn=None):
         conditions_stmt, params = self.parse_conditions(conditions)
@@ -333,7 +340,7 @@ class Database(AbstractDatabase):
 
                 affected = int(result.split()[-1])
                 return Response(
-                    success=affected > 0, lastrowid=None, error=None
+                    success=affected > 0, lastrowid=None, data={}, error=None
                 )
 
         except Exception as e:
@@ -342,7 +349,9 @@ class Database(AbstractDatabase):
             if conn is not None:
                 raise
 
-            return Response(success=False, lastrowid=None, error=str(e))
+            return Response(
+                success=False, lastrowid=None, data={}, error=str(e)
+            )
 
     async def insert(self, table, column_values={}, identifier="id", conn=None):
         async with self._get_connection(conn) as conn:
@@ -371,6 +380,7 @@ class Database(AbstractDatabase):
                 return Response(
                     success=True,
                     lastrowid=row[identifier] if row else None,
+                    data={},
                     error=None,
                 )
 
@@ -383,6 +393,7 @@ class Database(AbstractDatabase):
                 return Response(
                     success=False,
                     lastrowid=None,
+                    data={},
                     error=str(e),
                 )
 

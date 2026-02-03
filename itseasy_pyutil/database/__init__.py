@@ -106,10 +106,10 @@ class Response(NamedTuple):
     Response for sql other than SELECT
     """
 
-    success: bool
-    lastrowid: Optional[int]
-    data: Optional[Dict[str, Any]]
-    error: Optional[str]
+    success: bool = True
+    lastrowid: Optional[int] = None
+    error: Optional[str] = None
+    data: Optional[Dict[str, Any]] = {}
 
 
 class DatabaseAware:
