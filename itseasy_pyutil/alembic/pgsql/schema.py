@@ -12,10 +12,10 @@ from sqlalchemy import (
     inspect,
     text,
 )
+from sqlalchemy.dialects.postgresql import ARRAY as PG_ARRAY
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.sql.elements import TextClause
 from sqlalchemy.sql.schema import DefaultClause, ScalarElementColumnDefault
-from sqlalchemy.dialects.postgresql import ARRAY as PG_ARRAY
 
 from itseasy_pyutil.util import boolval
 
@@ -32,6 +32,8 @@ def normalize_default_value(default_value, column_type=None):
         return str(default_value)
     if isinstance(default_value, (list, tuple)):
         if not default_value:
+            if not column_type:
+                raise ValueError("Empty ARRAY default requires column_type")
             return f"ARRAY[]::{column_type}[]"
         return f"ARRAY[{', '.join(map(str, default_value))}]"
     if isinstance(default_value, bool):
@@ -118,7 +120,9 @@ def column_info(connection, table_name, column_name):
             col["type"],
             str(col["type"]),
             "yes" if col["nullable"] else "no",
-            normalize_default_value(col.get("default")),
+            normalize_default_value(
+                col.get("default"), column_type=normalize_sa_type(col["type"])
+            ),
             getattr(col["type"], "length", None),
             getattr(col["type"], "precision", None),
             getattr(col["type"], "scale", None),
@@ -397,7 +401,8 @@ def create_column_if_missing(connection, table_name, column_name, column_obj):
         alter_stmt += " NOT NULL"
 
     default_val = normalize_default_value(
-        column_obj.default or column_obj.server_default
+        column_obj.default or column_obj.server_default,
+        column_type=col_type_sql.rstrip("[]"),
     )
     if default_val is not None:
         alter_stmt += f" DEFAULT {default_val}"
@@ -429,7 +434,8 @@ def update_column_if_needed(
     # new_type = type(column_obj.type).__name__
     new_nullable = "yes" if column_obj.nullable else "no"
     new_default = normalize_default_value(
-        column_obj.default or column_obj.server_default
+        column_obj.default or column_obj.server_default,
+        column_type=new_col_type.rstrip("[]") if new_col_type else None,
     )
     new_length = getattr(column_obj.type, "length", None)
     new_precision = getattr(column_obj.type, "precision", None)
