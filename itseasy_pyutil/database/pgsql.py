@@ -564,6 +564,8 @@ class Database(AbstractDatabase):
             # ------------------------------------------------------------
             # 5️⃣ Execute
             # ------------------------------------------------------------
+            sql, values = self.prepare(sql, values)
+
             async with self._get_connection(conn) as conn:
                 async with conn.transaction():
                     row = await conn.fetchrow(sql, *values)
