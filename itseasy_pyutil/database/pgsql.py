@@ -75,6 +75,42 @@ class Database(AbstractDatabase):
         # -------------------------------------------------
         return sql, params
 
+    def build_filter_query(
+        self,
+        table,
+        columns=None,
+        joins=None,
+        conditions=None,
+        orders=None,
+        offset=0,
+        limit=1000,
+    ):
+        columns = columns or []
+        joins = joins or []
+        conditions = conditions or []
+        orders = orders or []
+
+        join_stmt, join_params = self.parse_joins(joins)
+        conditions_stmt, conditions_params = self.parse_conditions(conditions)
+
+        columns = [
+            self.sanitize_identifier(c, allow_star=True) for c in columns
+        ]
+        orders = [self.sanitize_order(o) for o in orders if o.strip()]
+
+        query = f"""
+            SELECT {",".join(columns) or "*"}
+            FROM {self.sanitize_identifier(table)}
+            {join_stmt}
+            {conditions_stmt}
+            {"ORDER BY " + ",".join(orders) if orders else ""}
+            LIMIT %s OFFSET %s
+        """
+
+        params = join_params + conditions_params + [limit, offset]
+
+        return query, params
+
     async def connect(self):
         self._pool = await asyncpg.create_pool(
             **self._db_config,
@@ -213,29 +249,20 @@ class Database(AbstractDatabase):
         limit=1000,
         conn=None,
     ):
-        join_stmt, join_params = self.parse_joins(joins)
-        conditions_stmt, conditions_params = self.parse_conditions(conditions)
+        query, params = self.build_filter_query(
+            table=table,
+            columns=columns,
+            joins=joins,
+            conditions=conditions,
+            orders=orders,
+            offset=offset,
+            limit=limit,
+        )
 
-        columns = [
-            self.sanitize_identifier(c, allow_star=True) for c in columns
-        ]
-        orders = [self.sanitize_order(o) for o in orders if o.strip()]
-
-        query = f"""
-            SELECT {",".join(columns) or "*"}
-            FROM {self.sanitize_identifier(table)}
-            {join_stmt}
-            {conditions_stmt}
-            {"ORDER BY" if len(orders) else ""}
-            {",".join(orders)}
-            LIMIT %s OFFSET %s
-        """
-
-        all_params = join_params + conditions_params + [limit, offset]
-        sql, params = self.prepare(query, all_params)
+        sql, prepared_params = self.prepare(query, params)
 
         async with self._get_connection(conn=conn) as conn:
-            rows = await conn.fetch(sql, *params)
+            rows = await conn.fetch(sql, *prepared_params)
             return [dict(r) for r in rows]
 
     async def get_count(
