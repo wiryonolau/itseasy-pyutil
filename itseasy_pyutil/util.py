@@ -14,6 +14,7 @@ from collections.abc import Mapping
 from typing import NamedTuple
 
 import dateutil
+import dateutil.parser
 import jwt
 from argon2 import PasswordHasher, Type
 from argon2.profiles import RFC_9106_LOW_MEMORY
@@ -453,10 +454,6 @@ def count_decimals(value):
         return len(value_str.split(".")[-1].rstrip("0"))
 
     return 0
-
-
-import datetime
-import dateutil.parser
 
 
 def normalize_datetime(value) -> datetime.datetime:

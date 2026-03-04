@@ -6,7 +6,7 @@ import traceback
 from collections import namedtuple
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timezone
-from typing import Any, NamedTuple, Optional, Dict
+from typing import Any, Dict, NamedTuple, Optional
 
 from itseasy_pyutil import get_logger, list_get
 
@@ -430,7 +430,12 @@ class AbstractDatabase(abc.ABC):
                     column=column, value=value, opr=opr, glue=glue
                 )
 
-            if condition.opr in ["not in", "in", "NOT IN", "IN"]:
+            if (
+                condition.opr in ["is", "is not", "IS", "IS NOT"]
+                and condition.value is None
+            ):
+                stmt = f"{condition.column} {condition.opr} NULL"
+            elif condition.opr in ["not in", "in", "NOT IN", "IN"]:
                 placeholders = ", ".join(["%s"] * len(condition.value))
                 stmt = f"{condition.column} {condition.opr} ({placeholders})"
                 params += condition.value
