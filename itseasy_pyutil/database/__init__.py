@@ -496,15 +496,25 @@ class AbstractDatabase(abc.ABC):
         return (stmt, join_params + conditions_params + [limit, offset])
 
     def insert_stmt(self, table, column_values={}):
-        columns = ",".join(
-            [self.sanitize_identifier(c) for c in column_values.keys()]
-        )
-        placeholders = ",".join(["%s"] * len(column_values))
-        values = list(column_values.values())
+        columns = []
+        placeholders = []
+        values = []
 
-        # Insert query
+        for col, val in column_values.items():
+            columns.append(self.sanitize_identifier(col))
+
+            if isinstance(val, Expression):
+                placeholders.append(str(val))
+            else:
+                placeholders.append("%s")
+                values.append(val)
+
+        columns_sql = ",".join(columns)
+        values_sql = ",".join(placeholders)
+
         insert_stmt = f"""
-        INSERT INTO {self.sanitize_identifier(table)} ({columns}) VALUES ({placeholders})
+        INSERT INTO {self.sanitize_identifier(table)} ({columns_sql})
+        VALUES ({values_sql})
         """
 
         return (insert_stmt, values)

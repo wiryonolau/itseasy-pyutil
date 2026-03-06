@@ -380,23 +380,37 @@ class Database(AbstractDatabase):
                 success=False, lastrowid=None, data={}, error=str(e)
             )
 
-    async def insert(self, table, column_values={}, identifier="id", conn=None):
+    async def insert(
+        self, table, column_values=None, identifier="id", conn=None
+    ):
+        column_values = column_values or {}
+
         async with self._get_connection(conn) as conn:
             try:
                 async with conn.transaction():
 
-                    # Build columns and values for INSERT
-                    columns = [
-                        self.sanitize_identifier(c, allow_star=True)
-                        for c in column_values.keys()
-                    ]
-                    columns = ",".join(columns)
-                    values = list(column_values.values())
+                    columns = []
+                    placeholders = []
+                    values = []
+
+                    for col, val in column_values.items():
+                        columns.append(
+                            self.sanitize_identifier(col, allow_star=True)
+                        )
+
+                        if isinstance(val, Expression):
+                            placeholders.append(str(val))
+                        else:
+                            placeholders.append("%s")
+                            values.append(val)
+
+                    columns_sql = ",".join(columns)
+                    placeholders_sql = ",".join(placeholders)
 
                     insert_stmt = f"""
                         INSERT INTO {self.sanitize_identifier(table)}
-                        ({columns})
-                        VALUES ({", ".join(["%s"] * len(values))})
+                        ({columns_sql})
+                        VALUES ({placeholders_sql})
                         RETURNING *
                     """
 
@@ -404,12 +418,12 @@ class Database(AbstractDatabase):
 
                     row = await conn.fetchrow(sql, *values)
 
-                return Response(
-                    success=True,
-                    lastrowid=row[identifier] if row else None,
-                    data={},
-                    error=None,
-                )
+                    return Response(
+                        success=True,
+                        lastrowid=row[identifier] if row else None,
+                        data=dict(row) if row else {},
+                        error=None,
+                    )
 
             except Exception as e:
                 self._logger.debug(f"Transaction failed: {sys.exc_info()}")
