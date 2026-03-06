@@ -11,6 +11,7 @@ from itseasy_pyutil.database import (
     AbstractDatabase,
     Condition,
     ConditionSet,
+    Expression,
     Response,
 )
 
