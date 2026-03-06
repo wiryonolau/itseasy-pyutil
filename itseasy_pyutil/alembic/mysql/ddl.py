@@ -1,19 +1,23 @@
 import datetime
 import importlib.util
+import logging
 import os
 
 import sqlalchemy as sa
 from sqlalchemy.sql import text
 
+logger = logging.getLogger(__name__)
+
 
 class DDLManager:
-    def __init__(self, conn, modules=[], app_package=None):
+    def __init__(self, conn, modules=[], app_package=None, dry_run=False):
         self.conn = conn
         self.app_modules_pkg = None
+        self.dry_run = dry_run
 
         if app_package is None:
             raise RuntimeError("DDLManager requires app_package=<package>")
-        
+
         if isinstance(app_package, str):
             self.app_package = app_package
         else:
@@ -55,16 +59,18 @@ class DDLManager:
             module = importlib.util.module_from_spec(spec)
 
             # inject functions
-            module.__dict__.update({
-                "rename_table": self.rename_table,
-                "rename_column": self.rename_column,
-                "create_partition": self.create_partition,
-                "create_trigger": self.create_trigger,
-                "create_audit_trigger" : self.create_audit_trigger,
-                "create_modified_trigger": self.create_modified_trigger,
-                "create_procedure": self.create_procedure,
-                "run_ddl": self.run_ddl,
-            })
+            module.__dict__.update(
+                {
+                    "rename_table": self.rename_table,
+                    "rename_column": self.rename_column,
+                    "create_partition": self.create_partition,
+                    "create_trigger": self.create_trigger,
+                    "create_audit_trigger": self.create_audit_trigger,
+                    "create_modified_trigger": self.create_modified_trigger,
+                    "create_procedure": self.create_procedure,
+                    "run_ddl": self.run_ddl,
+                }
+            )
 
             spec.loader.exec_module(module)
 
@@ -74,11 +80,13 @@ class DDLManager:
 
     def rename_table(self, old, new):
         exists_new = self.conn.execute(
-            sa.text("""
+            sa.text(
+                """
                 SELECT 1 FROM information_schema.TABLES
                 WHERE TABLE_SCHEMA = DATABASE()
                 AND TABLE_NAME = :name
-            """),
+            """
+            ),
             {"name": new},
         ).fetchone()
 
@@ -86,11 +94,13 @@ class DDLManager:
             return
 
         exists_old = self.conn.execute(
-            sa.text("""
+            sa.text(
+                """
                 SELECT 1 FROM information_schema.TABLES
                 WHERE TABLE_SCHEMA = DATABASE()
                 AND TABLE_NAME = :name
-            """),
+            """
+            ),
             {"name": old},
         ).fetchone()
 
@@ -99,15 +109,16 @@ class DDLManager:
 
         self.conn.execute(sa.text(f"RENAME TABLE `{old}` TO `{new}`;"))
 
-
     def rename_column(self, table, old, new):
         exists_new = self.conn.execute(
-            sa.text("""
+            sa.text(
+                """
                 SELECT 1 FROM information_schema.COLUMNS
                 WHERE TABLE_SCHEMA = DATABASE()
                 AND TABLE_NAME = :table
                 AND COLUMN_NAME = :col
-            """),
+            """
+            ),
             {"table": table, "col": new},
         ).fetchone()
 
@@ -115,13 +126,15 @@ class DDLManager:
             return
 
         old_col = self.conn.execute(
-            sa.text("""
+            sa.text(
+                """
                 SELECT COLUMN_TYPE, IS_NULLABLE, COLUMN_DEFAULT
                 FROM information_schema.COLUMNS
                 WHERE TABLE_SCHEMA = DATABASE()
                 AND TABLE_NAME = :table
                 AND COLUMN_NAME = :col
-            """),
+            """
+            ),
             {"table": table, "col": old},
         ).fetchone()
 
@@ -143,18 +156,29 @@ class DDLManager:
         """
         self.conn.execute(sa.text(sql))
 
-
-    def create_partition(self, table, column="created_at", year=None, mode="year", months_ahead=12):
+    def create_partition(
+        self,
+        table,
+        column="created_at",
+        year=None,
+        mode="year",
+        months_ahead=12,
+    ):
         conn = self.conn
         now = datetime.datetime.utcnow()
 
         # --- 0. Detect if table is already partitioned ---
-        rows = conn.execute(text("""
+        rows = conn.execute(
+            text(
+                """
             SELECT PARTITION_NAME
             FROM information_schema.PARTITIONS
             WHERE TABLE_SCHEMA = DATABASE()
             AND TABLE_NAME = :table
-        """), {"table": table}).fetchall()
+        """
+            ),
+            {"table": table},
+        ).fetchall()
 
         # MariaDB 11 returns NULL rows for non-partitioned tables → detect properly
         is_partitioned = any(row[0] is not None for row in rows)
@@ -264,9 +288,9 @@ class DDLManager:
 
                 # increment month
                 if cur.month == 12:
-                    cur = cur.replace(year=cur.year+1, month=1)
+                    cur = cur.replace(year=cur.year + 1, month=1)
                 else:
-                    cur = cur.replace(month=cur.month+1)
+                    cur = cur.replace(month=cur.month + 1)
 
             return
 
@@ -288,20 +312,25 @@ class DDLManager:
         else:
             raise ValueError("Unsupported partition mode")
 
-
-
-    def create_audit_trigger(self, table_name, pk_column, exclude_columns=None, drop=False):
+    def create_audit_trigger(
+        self, table_name, pk_column, exclude_columns=None, drop=False
+    ):
         if exclude_columns is None:
             exclude_columns = []
 
         # 1. Load columns for diff
-        rows = self.conn.execute(sa.text("""
+        rows = self.conn.execute(
+            sa.text(
+                """
             SELECT COLUMN_NAME
             FROM information_schema.COLUMNS
             WHERE TABLE_SCHEMA = DATABASE()
             AND TABLE_NAME = :table
             ORDER BY ORDINAL_POSITION
-        """), {"table": table_name}).fetchall()
+        """
+            ),
+            {"table": table_name},
+        ).fetchall()
 
         columns = [r[0] for r in rows]
         diff_cols = [c for c in columns if c not in exclude_columns]
@@ -390,39 +419,41 @@ class DDLManager:
         self.create_trigger(trg_a_upd, sql_a_upd, drop=drop)
         self.create_trigger(trg_a_del, sql_a_del, drop=drop)
 
-        print(f"Audit triggers created for table '{table_name}'")
-
+        logger.debug(f"Audit triggers created for table '{table_name}'")
 
     def create_trigger(self, name, sql, drop=False):
-        print(f"Create trigger for {name}")
+        logger.debug(f"Create trigger for {name}")
         exists = self.conn.execute(
-            sa.text("""
+            sa.text(
+                """
                 SELECT 1 FROM information_schema.TRIGGERS
                 WHERE TRIGGER_SCHEMA = DATABASE()
                 AND TRIGGER_NAME = :name
-            """),
+            """
+            ),
             {"name": name},
         ).fetchone()
 
         if exists and not drop:
             return
-        
+
         if drop:
             self.conn.execute(sa.text(f"DROP TRIGGER IF EXISTS {name}"))
 
         self.conn.execute(sa.text(sql))
 
-
     def create_modified_trigger(self, table, drop=False):
         name = f"{table}_BUPD"
-        print(f"Create modified trigger {name} for {table}")
+        logger.debug(f"Create modified trigger {name} for {table}")
 
         exists = self.conn.execute(
-            sa.text("""
+            sa.text(
+                """
                 SELECT 1 FROM information_schema.TRIGGERS
                 WHERE TRIGGER_SCHEMA = DATABASE()
                 AND TRIGGER_NAME = :name
-            """),
+            """
+            ),
             {"name": name},
         ).fetchone()
 
@@ -443,15 +474,16 @@ class DDLManager:
 
         self.conn.execute(sa.text(sql))
 
-
     def create_procedure(self, name, body, drop=False):
         exists = self.conn.execute(
-            sa.text("""
+            sa.text(
+                """
                 SELECT 1 FROM information_schema.ROUTINES
                 WHERE ROUTINE_SCHEMA = DATABASE()
                 AND ROUTINE_NAME = :name
                 AND ROUTINE_TYPE = 'PROCEDURE'
-            """),
+            """
+            ),
             {"name": name},
         ).fetchone()
 
@@ -463,7 +495,6 @@ class DDLManager:
 
         sql = f"CREATE PROCEDURE {name} {body}"
         self.conn.execute(sa.text(sql))
-
 
     def run_ddl(self, sql):
         self.conn.execute(sa.text(sql))

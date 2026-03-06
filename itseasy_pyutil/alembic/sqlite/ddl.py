@@ -1,12 +1,16 @@
 import importlib.util
+import logging
 import os
 
 import sqlalchemy as sa
 
+logger = logging.getLogger(__name__)
+
 
 class DDLManager:
-    def __init__(self, conn, modules=[], app_package=None):
+    def __init__(self, conn, modules=[], app_package=None, dry_run=False):
         self.conn = conn
+        self.dry_run = dry_run
 
         if app_package is None:
             raise RuntimeError("DDLManager requires app_package=<package>")

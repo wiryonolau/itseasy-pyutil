@@ -1,15 +1,19 @@
 import datetime
 import importlib.util
+import logging
 import os
 
 import sqlalchemy as sa
 from sqlalchemy.sql import text
 
+logger = logging.getLogger(__name__)
+
 
 class DDLManager:
-    def __init__(self, conn, modules=[], app_package=None):
+    def __init__(self, conn, modules=[], app_package=None, dry_run=False):
         self.conn = conn
         self.app_modules_pkg = None
+        self.dry_run = dry_run
 
         if app_package is None:
             raise RuntimeError("DDLManager requires app_package=<package>")
@@ -70,12 +74,10 @@ class DDLManager:
 
     def ddl_execute(self, sql: str):
         sql = sql.strip()
-        print(f"[DDL]\n{sql}")
+        if not self.dry_run:
+            print(f"[DDL]\n{sql}")
 
-        with self.conn.engine.connect().execution_options(
-            isolation_level="AUTOCOMMIT"
-        ) as conn:
-            conn.execute(sa.text(sql))
+        self.conn.execute(sa.text(sql))
 
     # ----------------------------------------------------------------
     # PostgreSQL DDL Handlers

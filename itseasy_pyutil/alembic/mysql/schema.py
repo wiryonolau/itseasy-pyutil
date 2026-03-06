@@ -1,3 +1,4 @@
+import logging
 import os
 import sys
 from logging.config import fileConfig
@@ -17,6 +18,8 @@ from sqlalchemy.sql.elements import TextClause
 from sqlalchemy.sql.schema import DefaultClause, ScalarElementColumnDefault
 
 from itseasy_pyutil.util import floatval
+
+logger = logging.getLogger(__name__)
 
 
 def normalize_column_type(mysql_type):
@@ -164,11 +167,11 @@ def remove_old_tables(connection, metadata):
 
     tables_to_drop = existing_tables - model_tables
     for table in tables_to_drop:
-        print(f"Dropping old table: {table}")  # Debugging log
+        logger.debug(f"Dropping old table: {table}")  # Debugging log
         try:
             connection.execute(text(f"DROP TABLE IF EXISTS `{table}`"))
         except SQLAlchemyError as e:
-            print(f"Error dropping {table}: {e}")
+            logger.debug(f"Error dropping {table}: {e}")
 
 
 def remove_old_columns(connection, metadata):
@@ -186,12 +189,12 @@ def remove_old_columns(connection, metadata):
             alter_stmt = (
                 f"ALTER TABLE `{table_name}` DROP COLUMN `{column_name}`"
             )
-            print(f"Dropping column: {alter_stmt}")  # Debugging log
+            logger.debug(f"Dropping column: {alter_stmt}")  # Debugging log
 
             try:
                 connection.execute(text(alter_stmt))
             except SQLAlchemyError as e:
-                print(
+                logger.debug(
                     f"Error dropping column {column_name} in {table_name}: {e}"
                 )
 
@@ -305,7 +308,7 @@ def modify_column_if_needed(connection, table_name, column_name, column_obj):
 
     if existing_info:
         if column_has_update(existing_info, new_info):
-            print(
+            logger.debug(
                 f"Checking {column_name} in {table_name} -> Existing: {existing_info}, New: {new_info}"
             )
             new_type = normalize_sa_type(new_type)
@@ -315,10 +318,12 @@ def modify_column_if_needed(connection, table_name, column_name, column_obj):
             else:
                 alter_stmt = f"ALTER TABLE `{table_name}` MODIFY COLUMN `{column_name}` {new_type}"
         else:
-            print(f"Skipping {table_name}.{column_name} : No changes detected.")
+            logger.debug(
+                f"Skipping {table_name}.{column_name} : No changes detected."
+            )
             return
     else:
-        print(
+        logger.debug(
             f"Column {column_name} does not exist in {table_name}. Creating column."
         )
         new_type = normalize_sa_type(new_type)
@@ -344,7 +349,7 @@ def modify_column_if_needed(connection, table_name, column_name, column_obj):
         alter_stmt += f" DEFAULT {new_default}"
 
     try:
-        print(alter_stmt)
+        logger.debug(alter_stmt)
         remove_column_fk(
             connection=connection,
             table_name=table_name,
@@ -353,7 +358,7 @@ def modify_column_if_needed(connection, table_name, column_name, column_obj):
         connection.execute(text(alter_stmt))
     except SQLAlchemyError as e:
         label = "Modifying" if existing_info else "Adding"
-        print(f"Error {label} {table_name}.{column_name}: {e}")
+        logger.debug(f"Error {label} {table_name}.{column_name}: {e}")
 
 
 def remove_column_fk(connection, table_name, column_name):
@@ -439,10 +444,10 @@ def sync_primary_keys(connection, metadata):
                         )
                     )
 
-            print(f"PK synced for table {table_name}")
+            logger.debug(f"PK synced for table {table_name}")
 
         except SQLAlchemyError as e:
-            print(f"Error syncing PK for {table_name}: {e}")
+            logger.debug(f"Error syncing PK for {table_name}: {e}")
             continue
 
 
@@ -467,7 +472,7 @@ def sync_indexes(connection, metadata):
             existing = existing_indexes.get(name)
 
             if not existing:
-                print(f"Creating index {name} on {table_name}")
+                logger.debug(f"Creating index {name} on {table_name}")
                 idx.create(connection)
                 continue
 
@@ -477,7 +482,7 @@ def sync_indexes(connection, metadata):
             if (existing_cols, existing_unique) == (model_cols, model_unique):
                 continue
 
-            print(
+            logger.debug(
                 f"Rebuilding index {name} on {table_name} "
                 f"(cols: {existing_cols} → {model_cols}, "
                 f"unique: {existing_unique} → {model_unique})"
@@ -511,7 +516,7 @@ def sync_foreign_keys(connection, metadata):
     inspector = inspect(connection)
 
     for table_name, table_obj in metadata.tables.items():
-        print(f"Checking foreign keys for table: {table_name}")
+        logger.debug(f"Checking foreign keys for table: {table_name}")
 
         # ---------- existing FKs ----------
         existing_fks = {}
@@ -541,7 +546,7 @@ def sync_foreign_keys(connection, metadata):
 
             model_fks[identity] = constraint.name
 
-            print(
+            logger.debug(
                 f"  Model FK: {identity[0]} → "
                 f"{identity[1]}{identity[2]} "
                 f"ON DELETE {identity[3]} "
@@ -551,7 +556,7 @@ def sync_foreign_keys(connection, metadata):
         # ---------- drop obsolete ----------
         for identity, fk_name in existing_fks.items():
             if identity not in model_fks:
-                print(f"Dropping FK {fk_name} on {table_name}")
+                logger.debug(f"Dropping FK {fk_name} on {table_name}")
                 connection.execute(
                     text(
                         f"ALTER TABLE `{table_name}` "
@@ -582,7 +587,7 @@ def sync_foreign_keys(connection, metadata):
             if onupdate != "RESTRICT":
                 sql += f" ON UPDATE {onupdate}"
 
-            print(f"Adding FK: {sql}")
+            logger.debug(f"Adding FK: {sql}")
             connection.execute(text(sql))
 
 
@@ -620,7 +625,9 @@ def sync_unique_constraints(connection, metadata):
         # ---- drop obsolete or changed uniques ----
         for identity, name in existing_uniques.items():
             if identity not in model_uniques:
-                print(f"Dropping unique constraint {name} on {table_name}")
+                logger.debug(
+                    f"Dropping unique constraint {name} on {table_name}"
+                )
                 connection.execute(
                     text(f"ALTER TABLE `{table_name}` " f"DROP INDEX `{name}`")
                 )
@@ -636,7 +643,7 @@ def sync_unique_constraints(connection, metadata):
                 f"ADD UNIQUE INDEX `{name}` ({cols_sql})"
             )
 
-            print(f"Adding unique constraint {name} on {table_name}")
+            logger.debug(f"Adding unique constraint {name} on {table_name}")
             connection.execute(text(sql))
 
 
@@ -648,11 +655,11 @@ def sync_check_constraints(connection, metadata):
     is_mariadb = "mariadb" in version.lower()
 
     if is_mariadb:
-        print("Skipping CHECK constraints (MariaDB ignores them)")
+        logger.debug("Skipping CHECK constraints (MariaDB ignores them)")
         return
 
     for table_name, table_obj in metadata.tables.items():
-        print(f"Checking CHECK constraints for table: {table_name}")
+        logger.debug(f"Checking CHECK constraints for table: {table_name}")
 
         # ---- existing CHECK constraints ----
         existing_checks = {}
@@ -679,7 +686,9 @@ def sync_check_constraints(connection, metadata):
         # ---- drop obsolete / changed CHECKs ----
         for identity, name in existing_checks.items():
             if identity not in model_checks:
-                print(f"Dropping CHECK constraint {name} on {table_name}")
+                logger.debug(
+                    f"Dropping CHECK constraint {name} on {table_name}"
+                )
                 connection.execute(
                     text(f"ALTER TABLE `{table_name}` " f"DROP CHECK `{name}`")
                 )
@@ -695,7 +704,7 @@ def sync_check_constraints(connection, metadata):
                 f"ADD CONSTRAINT `{name}` CHECK ({sqltext})"
             )
 
-            print(f"Adding CHECK constraint {name} on {table_name}")
+            logger.debug(f"Adding CHECK constraint {name} on {table_name}")
             connection.execute(text(sql))
 
 

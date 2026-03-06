@@ -1,5 +1,9 @@
+import logging
+
 from sqlalchemy import inspect, text
 from sqlalchemy.exc import SQLAlchemyError
+
+logger = logging.getLogger(__name__)
 
 
 # ----------------------------------------------------------------------
@@ -50,10 +54,10 @@ def sync_schema(engine, metadata):
         # --------------------------------------------------------------
         for table in metadata.tables.values():
             if not table_exists(conn, table.name):
-                print(f"Creating table: {table.name}")
+                logger.debug(f"Creating table: {table.name}")
                 table.create(conn)
             else:
-                print(f"Table exists: {table.name}")
+                logger.debug(f"Table exists: {table.name}")
 
         # --------------------------------------------------------------
         # 2. add missing columns
@@ -78,11 +82,13 @@ def sync_schema(engine, metadata):
                 if col.server_default is not None:
                     stmt += f" DEFAULT {col.server_default.arg}"
 
-                print(f"Adding column: {table_name}.{col.name}")
+                logger.debug(f"Adding column: {table_name}.{col.name}")
                 try:
                     conn.execute(text(stmt))
                 except SQLAlchemyError as e:
-                    print(f"Failed to add column {table_name}.{col.name}: {e}")
+                    logger.debug(
+                        f"Failed to add column {table_name}.{col.name}: {e}"
+                    )
 
         # --------------------------------------------------------------
         # 3. create indexes (includes unique constraints)
@@ -101,10 +107,10 @@ def sync_schema(engine, metadata):
                 if idx.name in existing_indexes:
                     continue
 
-                print(f"Creating index {idx.name} on {table_name}")
+                logger.debug(f"Creating index {idx.name} on {table_name}")
                 try:
                     idx.create(conn)
                 except SQLAlchemyError as e:
-                    print(f"Failed to create index {idx.name}: {e}")
+                    logger.debug(f"Failed to create index {idx.name}: {e}")
 
-        print("SQLite schema sync complete")
+        logger.debug("SQLite schema sync complete")
