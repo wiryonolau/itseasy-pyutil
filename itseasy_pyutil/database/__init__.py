@@ -466,6 +466,17 @@ class AbstractDatabase(abc.ABC):
         statements = " ".join(statements)
         return (f"{suffix} {statements}", params)
 
+    def _use_returning(self, returning):
+        if not returning:
+            return ""
+
+        if not self._dialects in ["pgsql", "postgresql"]:
+            return ""
+
+        cols = [self.sanitize_identifier(c, allow_star=True) for c in returning]
+
+        return f" RETURNING {','.join(cols)}"
+
     def select_stmt(
         self,
         table,
@@ -475,6 +486,7 @@ class AbstractDatabase(abc.ABC):
         orders=[],
         limit=100,
         offset=0,
+        for_update=False,
     ):
         join_stmt, join_params = self.parse_joins(joins)
         conditions_stmt, conditions_params = self.parse_conditions(conditions)
@@ -484,6 +496,11 @@ class AbstractDatabase(abc.ABC):
         ]
         orders = [self.sanitize_order(o) for o in orders if o.strip()]
 
+        for_update_sql = ""
+
+        if for_update and self._dialect != "sqlite":
+            for_update_sql = "FOR UPDATE"
+
         stmt = f"""
             SELECT {",".join(columns) or "*"}
             FROM {self.sanitize_identifier(table)}
@@ -492,15 +509,19 @@ class AbstractDatabase(abc.ABC):
             {"ORDER BY" if len(orders) else ""}
             {",".join(orders)}
             LIMIT %s OFFSET %s
+            {for_update_sql}
         """
+
         return (stmt, join_params + conditions_params + [limit, offset])
 
-    def insert_stmt(self, table, column_values={}):
+    def insert_stmt(self, table, column_values={}, returning=None):
+
         columns = []
         placeholders = []
         values = []
 
         for col, val in column_values.items():
+
             columns.append(self.sanitize_identifier(col))
 
             if isinstance(val, Expression):
@@ -512,25 +533,34 @@ class AbstractDatabase(abc.ABC):
         columns_sql = ",".join(columns)
         values_sql = ",".join(placeholders)
 
-        insert_stmt = f"""
-        INSERT INTO {self.sanitize_identifier(table)} ({columns_sql})
-        VALUES ({values_sql})
+        stmt = f"""
+            INSERT INTO {self.sanitize_identifier(table)} ({columns_sql})
+            VALUES ({values_sql})
         """
 
-        return (insert_stmt, values)
+        stmt += self._use_returning(returning)
+
+        return (stmt, values)
 
     def update_stmt(
-        self, table, identifiers=[], conditions=[], column_values={}
+        self,
+        table,
+        identifiers=[],
+        conditions=[],
+        column_values={},
+        returning=None,
     ):
-        condition_by_indentifier = []
+        condition_by_identifier = []
+
         for col in identifiers:
-            condition_by_indentifier.append(
+            condition_by_identifier.append(
                 Condition(column=col, value=column_values.get(col))
             )
 
-        conditions = condition_by_indentifier + [
+        conditions = condition_by_identifier + [
             ConditionSet(conditions=conditions)
         ]
+
         conditions, params = self.parse_conditions(conditions)
 
         update_columns = {
@@ -540,14 +570,20 @@ class AbstractDatabase(abc.ABC):
         }
 
         set_clause = ", ".join(
-            [f"{self.sanitize_identifier(col)}=%s" for col in update_columns]
+            f"{self.sanitize_identifier(col)}=%s" for col in update_columns
         )
 
-        update_stmt = f"UPDATE {self.sanitize_identifier(table)} SET {set_clause} {conditions}"
+        stmt = f"""
+            UPDATE {self.sanitize_identifier(table)}
+            SET {set_clause}
+            {conditions}
+        """
 
-        update_values = list(update_columns.values()) + params
+        stmt += self._use_returning(returning)
 
-        return (update_stmt, update_values)
+        values = list(update_columns.values()) + params
+
+        return (stmt, values)
 
     def delete_stmt(self, table, conditions=[]):
         conditions, params = self.parse_conditions(conditions)
