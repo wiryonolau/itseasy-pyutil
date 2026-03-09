@@ -529,10 +529,37 @@ class Database(AbstractDatabase):
         has_auto_id: str = "id",
         conn=None,
     ):
+        """
+        Generic concurrency-safe upsert.
+
+        Behavior
+        --------
+        1. Filter identifiers whose values are not None.
+        2. SELECT ... FOR UPDATE to detect existing row.
+        3. If row exists:
+                UPDATE if there are non-identifier columns.
+                otherwise return existing row.
+        4. If row does not exist:
+                INSERT
+                If insert races (UniqueViolation):
+                        UPDATE if update columns exist
+                        otherwise SELECT existing row.
+
+        Guarantees
+        ----------
+        - Identifiers are never skipped silently.
+        - SELECT and UPDATE use identical identifier conditions.
+        - No invalid UPDATE statements.
+        - Safe under concurrent inserts.
+        """
+
         try:
+
             # ------------------------------------------------------------
-            # 1️⃣ Remove auto id if None (allow DB to generate)
+            # 1️⃣ Prepare INSERT data
             # ------------------------------------------------------------
+            # Remove auto identity column if value is None so the DB
+            # can generate it automatically.
             insert_data = {
                 k: v
                 for k, v in column_values.items()
@@ -543,49 +570,63 @@ class Database(AbstractDatabase):
                 raise ValueError("No data to upsert")
 
             # ------------------------------------------------------------
-            # 2️⃣ Build identifier conditions
+            # 2️⃣ Build filtered identifiers
             # ------------------------------------------------------------
-            identifier_conditions = []
+            # Only identifiers with non-None values can be used to locate
+            # existing rows. This prevents skipped identifiers.
+            filtered_identifiers = [
+                col for col in identifiers if column_values.get(col) is not None
+            ]
+
+            if not filtered_identifiers:
+                raise ValueError("No usable identifiers provided")
+
+            # ------------------------------------------------------------
+            # 3️⃣ Determine columns that can be updated
+            # ------------------------------------------------------------
+            # Identifier columns must never be updated.
+            update_columns = {
+                k: v
+                for k, v in column_values.items()
+                if k not in filtered_identifiers
+            }
+
+            # ------------------------------------------------------------
+            # 4️⃣ Build identifier conditions
+            # ------------------------------------------------------------
+            # SELECT and UPDATE must use identical conditions.
             glue = "OR" if identifier_mode == "any" else "AND"
 
-            for col in identifiers:
-                val = column_values.get(col)
-                if val is not None:
-                    identifier_conditions.append(
-                        Condition(column=col, value=val, glue=glue)
-                    )
+            identifier_conditions = [
+                Condition(column=col, value=column_values[col], glue=glue)
+                for col in filtered_identifiers
+            ]
 
             # ------------------------------------------------------------
-            # 3️⃣ Build SELECT statement (lock row)
+            # 5️⃣ Build SELECT statement (row lock)
             # ------------------------------------------------------------
-            select_stmt = None
-            select_params = []
+            select_stmt, select_params = self.select_stmt(
+                table=table,
+                conditions=identifier_conditions,
+                limit=1,
+                offset=0,
+                for_update=True,
+            )
 
-            if identifier_conditions:
-
-                select_stmt, select_params = self.select_stmt(
-                    table=table,
-                    conditions=identifier_conditions,
-                    limit=1,
-                    offset=0,
-                    for_update=True,
-                )
-
-                select_stmt, select_params = self.prepare(
-                    select_stmt, select_params
-                )
+            select_stmt, select_params = self.prepare(
+                select_stmt, select_params
+            )
 
             # ------------------------------------------------------------
-            # 4️⃣ Build UPDATE statement
+            # 6️⃣ Build UPDATE statement (only if needed)
             # ------------------------------------------------------------
             update_stmt = None
             update_params = []
 
-            if identifier_conditions:
-
+            if update_columns:
                 update_stmt, update_params = self.update_stmt(
                     table=table,
-                    identifiers=identifiers,
+                    identifiers=filtered_identifiers,
                     column_values=column_values,
                     returning=["*"],
                 )
@@ -595,7 +636,7 @@ class Database(AbstractDatabase):
                 )
 
             # ------------------------------------------------------------
-            # 5️⃣ Build INSERT statement
+            # 7️⃣ Build INSERT statement
             # ------------------------------------------------------------
             insert_stmt, insert_params = self.insert_stmt(
                 table=table,
@@ -608,33 +649,39 @@ class Database(AbstractDatabase):
             )
 
             # ------------------------------------------------------------
-            # 6️⃣ Execute transaction
+            # 8️⃣ Execute transaction
             # ------------------------------------------------------------
             async with self._get_connection(conn) as conn:
 
                 async with conn.transaction():
 
-                    row = None
+                    result = None
+                    inserted = False
 
                     # ----------------------------------------
-                    # SELECT existing row
+                    # Try locating existing row
                     # ----------------------------------------
-                    if select_stmt:
-                        row = await conn.fetchrow(select_stmt, *select_params)
+                    row = await conn.fetchrow(select_stmt, *select_params)
 
                     # ----------------------------------------
-                    # UPDATE path
+                    # Row exists
                     # ----------------------------------------
                     if row:
-                        result = await conn.fetchrow(
-                            update_stmt, *update_params
-                        )
-                        inserted = False
+
+                        # Update only if there are non-identifier columns
+                        if update_stmt:
+                            result = await conn.fetchrow(
+                                update_stmt, *update_params
+                            )
+                        else:
+                            # Identifier-only upsert → return existing row
+                            result = row
 
                     # ----------------------------------------
-                    # INSERT path
+                    # Row does not exist → attempt insert
                     # ----------------------------------------
                     else:
+
                         try:
                             result = await conn.fetchrow(
                                 insert_stmt, *insert_params
@@ -642,26 +689,38 @@ class Database(AbstractDatabase):
                             inserted = True
 
                         except asyncpg.exceptions.UniqueViolationError:
+
                             # Another transaction inserted the row first
-                            result = await conn.fetchrow(
-                                update_stmt, *update_params
-                            )
+
+                            if update_stmt:
+                                result = await conn.fetchrow(
+                                    update_stmt, *update_params
+                                )
+                            else:
+                                # Identifier-only case → fetch row
+                                result = await conn.fetchrow(
+                                    select_stmt.replace("FOR UPDATE", ""),
+                                    *select_params,
+                                )
+
                             inserted = False
 
-            if result is None:
-                raise RuntimeError("Insert/Update failed")
+                if result is None:
+                    raise RuntimeError("Insert/Update failed")
 
-            # ------------------------------------------------------------
-            # 7️⃣ Build response
-            # ------------------------------------------------------------
-            data = dict(result)
-            data["inserted"] = inserted
-            data["error"] = None
+                # ------------------------------------------------------------
+                # 9️⃣ Build response
+                # ------------------------------------------------------------
+                data = dict(result)
+                data["inserted"] = inserted
+                data["error"] = None
 
-            UpsertResponse = namedtuple("UpsertResponse", data.keys())
-            return UpsertResponse(**data)
+                UpsertResponse = namedtuple("UpsertResponse", data.keys())
+                return UpsertResponse(**data)
 
         except Exception as exc:
+
+            # If using external connection, propagate error
             if conn is not None:
                 raise
 

@@ -498,7 +498,7 @@ class AbstractDatabase(abc.ABC):
 
         for_update_sql = ""
 
-        if for_update and self._dialect != "sqlite":
+        if for_update and self._dialects != "sqlite":
             for_update_sql = "FOR UPDATE"
 
         stmt = f"""
