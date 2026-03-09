@@ -525,41 +525,13 @@ class Database(AbstractDatabase):
         table: str,
         identifiers: list[str],
         column_values: dict,
-        identifier_mode: str = "any",
         has_auto_id: str = "id",
         conn=None,
     ):
-        """
-        Generic concurrency-safe upsert.
-
-        Behavior
-        --------
-        1. Filter identifiers whose values are not None.
-        2. SELECT ... FOR UPDATE to detect existing row.
-        3. If row exists:
-                UPDATE if there are non-identifier columns.
-                otherwise return existing row.
-        4. If row does not exist:
-                INSERT
-                If insert races (UniqueViolation):
-                        UPDATE if update columns exist
-                        otherwise SELECT existing row.
-
-        Guarantees
-        ----------
-        - Identifiers are never skipped silently.
-        - SELECT and UPDATE use identical identifier conditions.
-        - No invalid UPDATE statements.
-        - Safe under concurrent inserts.
-        """
-
         try:
-
             # ------------------------------------------------------------
-            # 1️⃣ Prepare INSERT data
+            # 1️⃣ Remove auto id if None (allow DB to generate)
             # ------------------------------------------------------------
-            # Remove auto identity column if value is None so the DB
-            # can generate it automatically.
             insert_data = {
                 k: v
                 for k, v in column_values.items()
@@ -570,157 +542,89 @@ class Database(AbstractDatabase):
                 raise ValueError("No data to upsert")
 
             # ------------------------------------------------------------
-            # 2️⃣ Build filtered identifiers
+            # 2️⃣ Conflict keys come from ORIGINAL payload, not insert_data
             # ------------------------------------------------------------
-            # Only identifiers with non-None values can be used to locate
-            # existing rows. This prevents skipped identifiers.
-            filtered_identifiers = [
-                col for col in identifiers if column_values.get(col) is not None
+            conflict_keys = [
+                c
+                for c in identifiers
+                if c in column_values and column_values[c] is not None
             ]
 
-            if not filtered_identifiers:
-                raise ValueError("No usable identifiers provided")
+            use_upsert = bool(conflict_keys)
 
             # ------------------------------------------------------------
-            # 3️⃣ Determine columns that can be updated
+            # 3️⃣ Build SQL components
             # ------------------------------------------------------------
-            # Identifier columns must never be updated.
-            update_columns = {
-                k: v
-                for k, v in column_values.items()
-                if k not in filtered_identifiers
-            }
+            cols = list(insert_data.keys())
+            values = list(insert_data.values())
+
+            safe_table = self.sanitize_identifier(table)
+            safe_cols = [self.sanitize_identifier(c) for c in cols]
+            placeholders = [f"${i}" for i in range(1, len(cols) + 1)]
 
             # ------------------------------------------------------------
-            # 4️⃣ Build identifier conditions
+            # 4️⃣ Build SQL
             # ------------------------------------------------------------
-            # SELECT and UPDATE must use identical conditions.
-            glue = "OR" if identifier_mode == "any" else "AND"
+            if use_upsert:
+                safe_conflicts = [
+                    self.sanitize_identifier(c) for c in conflict_keys
+                ]
 
-            identifier_conditions = [
-                Condition(column=col, value=column_values[col], glue=glue)
-                for col in filtered_identifiers
-            ]
+                update_cols = [c for c in cols if c not in conflict_keys]
 
-            # ------------------------------------------------------------
-            # 5️⃣ Build SELECT statement (row lock)
-            # ------------------------------------------------------------
-            select_stmt, select_params = self.select_stmt(
-                table=table,
-                conditions=identifier_conditions,
-                limit=1,
-                offset=0,
-                for_update=True,
-            )
+                if update_cols:
+                    update_clause = ", ".join(
+                        f"{self.sanitize_identifier(c)} = EXCLUDED.{self.sanitize_identifier(c)}"
+                        for c in update_cols
+                    )
+                else:
+                    # Composite-safe no-op update
+                    noop = self.sanitize_identifier(conflict_keys[0])
+                    update_clause = f"{noop} = {safe_table}.{noop}"
 
-            select_stmt, select_params = self.prepare(
-                select_stmt, select_params
-            )
-
-            # ------------------------------------------------------------
-            # 6️⃣ Build UPDATE statement (only if needed)
-            # ------------------------------------------------------------
-            update_stmt = None
-            update_params = []
-
-            if update_columns:
-                update_stmt, update_params = self.update_stmt(
-                    table=table,
-                    identifiers=filtered_identifiers,
-                    column_values=column_values,
-                    returning=["*"],
-                )
-
-                update_stmt, update_params = self.prepare(
-                    update_stmt, update_params
-                )
+                sql = f"""
+                    INSERT INTO {safe_table}
+                        ({", ".join(safe_cols)})
+                    VALUES
+                        ({", ".join(placeholders)})
+                    ON CONFLICT ({", ".join(safe_conflicts)})
+                    DO UPDATE SET
+                        {update_clause}
+                    RETURNING *,
+                            (xmax = 0) AS inserted
+                """
+            else:
+                # Fallback: pure insert
+                sql = f"""
+                    INSERT INTO {safe_table}
+                        ({", ".join(safe_cols)})
+                    VALUES
+                        ({", ".join(placeholders)})
+                    RETURNING *, true AS inserted
+                """
 
             # ------------------------------------------------------------
-            # 7️⃣ Build INSERT statement
+            # 5️⃣ Execute
             # ------------------------------------------------------------
-            insert_stmt, insert_params = self.insert_stmt(
-                table=table,
-                column_values=insert_data,
-                returning=["*"],
-            )
+            sql, values = self.prepare(sql, values)
 
-            insert_stmt, insert_params = self.prepare(
-                insert_stmt, insert_params
-            )
-
-            # ------------------------------------------------------------
-            # 8️⃣ Execute transaction
-            # ------------------------------------------------------------
             async with self._get_connection(conn) as conn:
-
                 async with conn.transaction():
+                    row = await conn.fetchrow(sql, *values)
 
-                    result = None
-                    inserted = False
+            if row is None:
+                raise RuntimeError("Insert/Upsert failed: no row returned")
 
-                    # ----------------------------------------
-                    # Try locating existing row
-                    # ----------------------------------------
-                    row = await conn.fetchrow(select_stmt, *select_params)
+            # ------------------------------------------------------------
+            # 6️⃣ Return response
+            # ------------------------------------------------------------
+            data = dict(row)
+            data["error"] = None
 
-                    # ----------------------------------------
-                    # Row exists
-                    # ----------------------------------------
-                    if row:
-
-                        # Update only if there are non-identifier columns
-                        if update_stmt:
-                            result = await conn.fetchrow(
-                                update_stmt, *update_params
-                            )
-                        else:
-                            # Identifier-only upsert → return existing row
-                            result = row
-
-                    # ----------------------------------------
-                    # Row does not exist → attempt insert
-                    # ----------------------------------------
-                    else:
-
-                        try:
-                            result = await conn.fetchrow(
-                                insert_stmt, *insert_params
-                            )
-                            inserted = True
-
-                        except asyncpg.exceptions.UniqueViolationError:
-
-                            # Another transaction inserted the row first
-
-                            if update_stmt:
-                                result = await conn.fetchrow(
-                                    update_stmt, *update_params
-                                )
-                            else:
-                                # Identifier-only case → fetch row
-                                result = await conn.fetchrow(
-                                    select_stmt.replace("FOR UPDATE", ""),
-                                    *select_params,
-                                )
-
-                            inserted = False
-
-                if result is None:
-                    raise RuntimeError("Insert/Update failed")
-
-                # ------------------------------------------------------------
-                # 9️⃣ Build response
-                # ------------------------------------------------------------
-                data = dict(result)
-                data["inserted"] = inserted
-                data["error"] = None
-
-                UpsertResponse = namedtuple("UpsertResponse", data.keys())
-                return UpsertResponse(**data)
+            UpsertResponse = namedtuple("UpsertResponse", data.keys())
+            return UpsertResponse(**data)
 
         except Exception as exc:
-
-            # If using external connection, propagate error
             if conn is not None:
                 raise
 
