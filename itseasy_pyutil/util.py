@@ -2,6 +2,8 @@ import collections
 import datetime
 import decimal
 import enum
+import hashlib
+import hmac
 import json
 import logging
 import math
@@ -17,7 +19,6 @@ import dateutil
 import dateutil.parser
 import jwt
 from argon2 import PasswordHasher, Type
-from argon2.profiles import RFC_9106_LOW_MEMORY
 
 ph = PasswordHasher(
     type=Type.ID,
@@ -250,13 +251,6 @@ def hmac_hashing(secret, payload):
     return m.hexdigest()
 
 
-def rsa_signature(private_key, payload, private_key_pass=None):
-    private_key = RSA.import_key(private_key, passphrase=private_key_pass)
-    h = SHA256.new(payload.encode("utf-8"))
-    signature = pkcs1_15.new(private_key).sign(h)
-    return b64encode(signature)
-
-
 def dict_merge(d, u) -> dict:
     for k, v in u.items():
         if isinstance(v, collections.abc.Mapping):
@@ -417,14 +411,6 @@ def upsert_item(obj_list, key, match_value, extra_data=None, replace=False):
 
     obj_list.append(new_obj)
     return obj_list
-
-
-def eval_js(js_code):
-    try:
-        return pm.eval(js_code, {"strict": True, "module": False})
-    except:
-        print([js_code, sys.exc_info()])
-        return json.dumps({"error": True})
 
 
 def ceil_to_step(value, step=0.001):

@@ -1,7 +1,5 @@
 import logging
-import sys
 
-import sqlalchemy as sa
 from sqlalchemy.sql import Executable
 
 from itseasy_pyutil.database.formatter import SQLFormatter

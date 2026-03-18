@@ -7,8 +7,6 @@ from sqlalchemy import (
     Enum,
     ForeignKeyConstraint,
     Integer,
-    MetaData,
-    Table,
     UniqueConstraint,
     inspect,
     text,

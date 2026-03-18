@@ -8,6 +8,8 @@ from contextlib import asynccontextmanager
 from datetime import date, datetime, timezone
 from typing import Any, Dict, NamedTuple, Optional
 
+import pymysql
+
 from itseasy_pyutil import get_logger, list_get
 
 SAFE_IDENTIFIER = re.compile(
@@ -470,7 +472,7 @@ class AbstractDatabase(abc.ABC):
         if not returning:
             return ""
 
-        if not self._dialects in ["pgsql", "postgresql"]:
+        if self._dialects not in ["pgsql", "postgresql"]:
             return ""
 
         cols = [self.sanitize_identifier(c, allow_star=True) for c in returning]

@@ -1,6 +1,9 @@
 from sqlalchemy.dialects.postgresql import base
 from sqlalchemy.types import UserDefinedType
 
+from itseasy_pyutil.alembic.pgsql.ddl import DDLManager
+from itseasy_pyutil.alembic.pgsql.schema import sync_schema
+
 
 class LTREE(UserDefinedType):
     cache_ok = True
@@ -12,7 +15,3 @@ class LTREE(UserDefinedType):
 # One-time registration on import
 if "ltree" not in base.ischema_names:
     base.ischema_names["ltree"] = LTREE
-
-
-from itseasy_pyutil.alembic.pgsql.ddl import DDLManager
-from itseasy_pyutil.alembic.pgsql.schema import sync_schema

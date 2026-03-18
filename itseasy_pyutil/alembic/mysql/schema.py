@@ -1,15 +1,8 @@
 import logging
-import os
-import sys
-from logging.config import fileConfig
 
-from alembic import context
 from sqlalchemy import (
-    CheckConstraint,
     ForeignKeyConstraint,
-    PrimaryKeyConstraint,
     UniqueConstraint,
-    create_engine,
     inspect,
     text,
 )
@@ -290,7 +283,7 @@ def modify_column_if_needed(connection, table_name, column_name, column_obj):
     new_precision = getattr(column_obj.type, "precision", None)
     new_scale = getattr(column_obj.type, "scale", None)
     new_erratas = {
-        "auto_increment": True if column_obj.autoincrement == True else False
+        "auto_increment": True if column_obj.autoincrement else False
     }
     new_is_unsigned = getattr(column_obj.type, "unsigned", False)
 
@@ -338,9 +331,9 @@ def modify_column_if_needed(connection, table_name, column_name, column_obj):
     elif new_precision is not None and new_scale is not None:
         alter_stmt += f"({new_precision}, {new_scale})"
     if new_is_unsigned:
-        alter_stmt += f" UNSIGNED"
+        alter_stmt += " UNSIGNED"
     if new_erratas.get("auto_increment"):
-        alter_stmt += f" AUTO_INCREMENT"
+        alter_stmt += " AUTO_INCREMENT"
     if new_nullable == "no":
         alter_stmt += " NOT NULL"
     if new_default is not None:
@@ -364,7 +357,7 @@ def modify_column_if_needed(connection, table_name, column_name, column_obj):
 def remove_column_fk(connection, table_name, column_name):
     fks = connection.execute(
         text(
-            f"""
+            """
         SELECT CONSTRAINT_NAME, TABLE_NAME
         FROM information_schema.KEY_COLUMN_USAGE
         WHERE REFERENCED_TABLE_SCHEMA = DATABASE()
