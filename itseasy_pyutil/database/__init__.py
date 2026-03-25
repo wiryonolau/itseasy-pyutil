@@ -121,10 +121,19 @@ class DatabaseAware:
 
 
 class AbstractDatabase(abc.ABC):
-    def __init__(self, db_config, as_dev: bool = False, dialects=None):
+    def __init__(
+        self,
+        db_config,
+        max_limit=None,
+        max_offset=None,
+        as_dev: bool = False,
+        dialects=None,
+    ):
         self._db_config = db_config
         self._dialects = dialects
         self._pool = None
+        self._max_limit = None
+        self._max_offset = None
         self._as_dev = as_dev
 
         self._logger = get_logger(self.__class__.__name__)
