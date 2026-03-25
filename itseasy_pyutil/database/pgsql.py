@@ -650,150 +650,83 @@ class Database(AbstractDatabase):
             UpsertResponse = namedtuple("UpsertResponse", ["error"])
             return UpsertResponse(error=str(exc))
 
+    async def upsert2(
+        self,
+        table: str,
+        identifier_keys: list[str],
+        update_keys: list[str],
+        values: dict,
+        optional_keys: list[str] | None = None,
+        conn=None,
+    ):
+        """
+        # upsert2:
+        # - Try UPDATE first using `update_keys` columns that have non-None values.
+        # - If no row is updated, try INSERT with all `values`.
+        # - If INSERT hits a unique conflict, retry UPDATE once.
+        #
+        # Why this design:
+        # - keeps API simple for caller: pass one `values` dict
+        # - caller can choose different columns for UPDATE matching (`update_keys`)
+        # - `identifier_keys` are treated as identity columns and are never included in UPDATE SET
+        # - safer under concurrency than plain select-then-insert
+        # - allows database-generated values by skipping `optional_keys`
+        #   when their input value is None
+        #
+        # Arguments:
+        # - table: target table name
+        # - identifier_keys: identity/unique columns used for response shape on error;
+        #   these columns are also excluded from UPDATE SET
+        # - update_keys: columns used to match existing row for UPDATE (WHERE)
+        # - values: all column values for insert/update decision
+        # - optional_keys: columns that can be skipped on INSERT when value is None,
+        #   allowing DB defaults to apply
+        #
+        # Notes:
+        # - only `update_keys` columns with non-None values are used in UPDATE WHERE
+        # - UPDATE SET uses columns from `values` except active `update_keys` and `identifier_keys`
+        # - INSERT uses all `values` except `optional_keys` with None value
+        # - returns full row on success, plus error=None
+        # - returns `{key: None, ..., error: "..."}`
+        #   on standalone failure
+        """
+        optional_keys = optional_keys or []
+        safe_table = self.sanitize_identifier(table)
 
-async def upsert2(
-    self,
-    table: str,
-    identifier_keys: list[str],
-    update_keys: list[str],
-    values: dict,
-    optional_keys: list[str] | None = None,
-    conn=None,
-):
-    """
-    # upsert2:
-    # - Try UPDATE first using `update_keys` columns that have non-None values.
-    # - If no row is updated, try INSERT with all `values`.
-    # - If INSERT hits a unique conflict, retry UPDATE once.
-    #
-    # Why this design:
-    # - keeps API simple for caller: pass one `values` dict
-    # - caller can choose different columns for UPDATE matching (`update_keys`)
-    # - `identifier_keys` are treated as identity columns and are never included in UPDATE SET
-    # - safer under concurrency than plain select-then-insert
-    # - allows database-generated values by skipping `optional_keys`
-    #   when their input value is None
-    #
-    # Arguments:
-    # - table: target table name
-    # - identifier_keys: identity/unique columns used for response shape on error;
-    #   these columns are also excluded from UPDATE SET
-    # - update_keys: columns used to match existing row for UPDATE (WHERE)
-    # - values: all column values for insert/update decision
-    # - optional_keys: columns that can be skipped on INSERT when value is None,
-    #   allowing DB defaults to apply
-    #
-    # Notes:
-    # - only `update_keys` columns with non-None values are used in UPDATE WHERE
-    # - UPDATE SET uses columns from `values` except active `update_keys` and `identifier_keys`
-    # - INSERT uses all `values` except `optional_keys` with None value
-    # - returns full row on success, plus error=None
-    # - returns `{key: None, ..., error: "..."}`
-    #   on standalone failure
-    """
-    optional_keys = optional_keys or []
-    safe_table = self.sanitize_identifier(table)
+        # Split columns:
+        # - active_update_keys: update-keys with a non-None value → go to WHERE
+        # - set_columns: columns used in UPDATE SET
+        # - identifier_keys: identity columns, never go to SET
+        # - optional_keys with None value: stripped from INSERT, let DB generate
+        active_update_keys = [
+            k for k in update_keys if k in values and values[k] is not None
+        ]
 
-    # Split columns:
-    # - active_update_keys: update-keys with a non-None value → go to WHERE
-    # - set_columns: columns used in UPDATE SET
-    # - identifier_keys: identity columns, never go to SET
-    # - optional_keys with None value: stripped from INSERT, let DB generate
-    active_update_keys = [
-        k for k in update_keys if k in values and values[k] is not None
-    ]
+        set_columns = [
+            k
+            for k in values.keys()
+            if k not in active_update_keys and k not in identifier_keys
+        ]
 
-    set_columns = [
-        k
-        for k in values.keys()
-        if k not in active_update_keys and k not in identifier_keys
-    ]
+        try:
+            async with self._get_connection(conn) as conn:
+                async with conn.transaction():
+                    row = None
 
-    try:
-        async with self._get_connection(conn) as conn:
-            async with conn.transaction():
-                row = None
-
-                # ------------------------------------------------
-                # 1) Try UPDATE first
-                # ------------------------------------------------
-                if active_update_keys and set_columns:
-                    set_parts, where_parts, args = [], [], []
-                    idx = 1
-
-                    for col in set_columns:
-                        set_parts.append(
-                            f"{self.sanitize_identifier(col)} = ${idx}"
-                        )
-                        args.append(values[col])
-                        idx += 1
-
-                    for col in active_update_keys:
-                        where_parts.append(
-                            f"{self.sanitize_identifier(col)} = ${idx}"
-                        )
-                        args.append(values[col])
-                        idx += 1
-
-                    sql = f"""
-                        UPDATE {safe_table}
-                        SET {", ".join(set_parts)}
-                        WHERE {" AND ".join(where_parts)}
-                        RETURNING *
-                    """
-                    sql, args = self.prepare(sql, args)
-                    row = await conn.fetchrow(sql, *args)
-
-                # ------------------------------------------------
-                # 2) INSERT if UPDATE found nothing
-                # ------------------------------------------------
-                if row is None:
-                    # Strip optional_keys where value is None — let DB generate
-                    insert_data = {
-                        k: v
-                        for k, v in values.items()
-                        if not (k in optional_keys and v is None)
-                    }
-
-                    if not insert_data:
-                        raise ValueError("No data to insert")
-
-                    ins_cols = [
-                        self.sanitize_identifier(k) for k in insert_data.keys()
-                    ]
-                    placeholders = [
-                        f"${i}" for i in range(1, len(ins_cols) + 1)
-                    ]
-
-                    insert_sql = f"""
-                        INSERT INTO {safe_table} ({", ".join(ins_cols)})
-                        VALUES ({", ".join(placeholders)})
-                        RETURNING *
-                    """
-                    insert_sql, insert_vals = self.prepare(
-                        insert_sql, list(insert_data.values())
-                    )
-
-                    try:
-                        async with conn.transaction():
-                            row = await conn.fetchrow(insert_sql, *insert_vals)
-
-                    except asyncpg.UniqueViolationError:
-                        # ----------------------------------------
-                        # 3) Race condition: another TX inserted first,
-                        #    retry the UPDATE
-                        # ----------------------------------------
-                        if not (active_update_keys and set_columns):
-                            raise
-
+                    # ------------------------------------------------
+                    # 1) Try UPDATE first
+                    # ------------------------------------------------
+                    if active_update_keys and set_columns:
                         set_parts, where_parts, args = [], [], []
                         idx = 1
+
                         for col in set_columns:
                             set_parts.append(
                                 f"{self.sanitize_identifier(col)} = ${idx}"
                             )
                             args.append(values[col])
                             idx += 1
+
                         for col in active_update_keys:
                             where_parts.append(
                                 f"{self.sanitize_identifier(col)} = ${idx}"
@@ -801,34 +734,103 @@ async def upsert2(
                             args.append(values[col])
                             idx += 1
 
-                        retry_sql = f"""
+                        sql = f"""
                             UPDATE {safe_table}
                             SET {", ".join(set_parts)}
                             WHERE {" AND ".join(where_parts)}
                             RETURNING *
                         """
-                        retry_sql, args = self.prepare(retry_sql, args)
-                        row = await conn.fetchrow(retry_sql, *args)
+                        sql, args = self.prepare(sql, args)
+                        row = await conn.fetchrow(sql, *args)
 
-                if row is None:
-                    raise RuntimeError(
-                        f"Upsert failed on table '{table}': row could not be inserted or updated. "
-                        "It may have been deleted mid-transaction."
-                    )
+                    # ------------------------------------------------
+                    # 2) INSERT if UPDATE found nothing
+                    # ------------------------------------------------
+                    if row is None:
+                        # Strip optional_keys where value is None — let DB generate
+                        insert_data = {
+                            k: v
+                            for k, v in values.items()
+                            if not (k in optional_keys and v is None)
+                        }
 
-                # Success: all row fields + error=None
-                data = dict(row)
-                data["error"] = None
-                UpsertResponse = namedtuple("UpsertResponse", data.keys())
-                return UpsertResponse(**data)
+                        if not insert_data:
+                            raise ValueError("No data to insert")
 
-    except Exception as exc:
-        # Shared transaction: propagate so parent can rollback
-        if conn is not None:
-            raise
+                        ins_cols = [
+                            self.sanitize_identifier(k)
+                            for k in insert_data.keys()
+                        ]
+                        placeholders = [
+                            f"${i}" for i in range(1, len(ins_cols) + 1)
+                        ]
 
-        # Standalone call: soft error with identifier_keys set to None
-        error_fields = {k: None for k in identifier_keys}
-        error_fields["error"] = str(exc)
-        UpsertResponse = namedtuple("UpsertResponse", error_fields.keys())
-        return UpsertResponse(**error_fields)
+                        insert_sql = f"""
+                            INSERT INTO {safe_table} ({", ".join(ins_cols)})
+                            VALUES ({", ".join(placeholders)})
+                            RETURNING *
+                        """
+                        insert_sql, insert_vals = self.prepare(
+                            insert_sql, list(insert_data.values())
+                        )
+
+                        try:
+                            async with conn.transaction():
+                                row = await conn.fetchrow(
+                                    insert_sql, *insert_vals
+                                )
+
+                        except asyncpg.UniqueViolationError:
+                            # ----------------------------------------
+                            # 3) Race condition: another TX inserted first,
+                            #    retry the UPDATE
+                            # ----------------------------------------
+                            if not (active_update_keys and set_columns):
+                                raise
+
+                            set_parts, where_parts, args = [], [], []
+                            idx = 1
+                            for col in set_columns:
+                                set_parts.append(
+                                    f"{self.sanitize_identifier(col)} = ${idx}"
+                                )
+                                args.append(values[col])
+                                idx += 1
+                            for col in active_update_keys:
+                                where_parts.append(
+                                    f"{self.sanitize_identifier(col)} = ${idx}"
+                                )
+                                args.append(values[col])
+                                idx += 1
+
+                            retry_sql = f"""
+                                UPDATE {safe_table}
+                                SET {", ".join(set_parts)}
+                                WHERE {" AND ".join(where_parts)}
+                                RETURNING *
+                            """
+                            retry_sql, args = self.prepare(retry_sql, args)
+                            row = await conn.fetchrow(retry_sql, *args)
+
+                    if row is None:
+                        raise RuntimeError(
+                            f"Upsert failed on table '{table}': row could not be inserted or updated. "
+                            "It may have been deleted mid-transaction."
+                        )
+
+                    # Success: all row fields + error=None
+                    data = dict(row)
+                    data["error"] = None
+                    UpsertResponse = namedtuple("UpsertResponse", data.keys())
+                    return UpsertResponse(**data)
+
+        except Exception as exc:
+            # Shared transaction: propagate so parent can rollback
+            if conn is not None:
+                raise
+
+            # Standalone call: soft error with identifier_keys set to None
+            error_fields = {k: None for k in identifier_keys}
+            error_fields["error"] = str(exc)
+            UpsertResponse = namedtuple("UpsertResponse", error_fields.keys())
+            return UpsertResponse(**error_fields)
