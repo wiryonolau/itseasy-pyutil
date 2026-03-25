@@ -693,11 +693,6 @@ class Database(AbstractDatabase):
         optional_keys = optional_keys or []
         safe_table = self.sanitize_identifier(table)
 
-        # Split columns:
-        # - active_update_keys: update-keys with a non-None value → go to WHERE
-        # - set_columns: columns used in UPDATE SET
-        # - identifier_keys: identity columns, never go to SET
-        # - optional_keys with None value: stripped from INSERT, let DB generate
         active_update_keys = [
             k for k in update_keys if k in values and values[k] is not None
         ]
@@ -714,7 +709,7 @@ class Database(AbstractDatabase):
                     row = None
 
                     # ------------------------------------------------
-                    # 1) Try UPDATE first
+                    # 1) UPDATE
                     # ------------------------------------------------
                     if active_update_keys and set_columns:
                         set_parts, where_parts, args = [], [], []
@@ -740,14 +735,21 @@ class Database(AbstractDatabase):
                             WHERE {" AND ".join(where_parts)}
                             RETURNING *
                         """
-                        sql, args = self.prepare(sql, args)
+                        sql = " ".join(sql.split())
+                        args = list(args)
+
+                        try:
+                            sql, args = self.prepare(sql, args)
+                        except Exception as e:
+                            if "bad escape" not in str(e):
+                                raise
+
                         row = await conn.fetchrow(sql, *args)
 
                     # ------------------------------------------------
-                    # 2) INSERT if UPDATE found nothing
+                    # 2) INSERT
                     # ------------------------------------------------
                     if row is None:
-                        # Strip optional_keys where value is None — let DB generate
                         insert_data = {
                             k: v
                             for k, v in values.items()
@@ -770,9 +772,16 @@ class Database(AbstractDatabase):
                             VALUES ({", ".join(placeholders)})
                             RETURNING *
                         """
-                        insert_sql, insert_vals = self.prepare(
-                            insert_sql, list(insert_data.values())
-                        )
+                        insert_sql = " ".join(insert_sql.split())
+                        insert_vals = list(insert_data.values())
+
+                        try:
+                            insert_sql, insert_vals = self.prepare(
+                                insert_sql, insert_vals
+                            )
+                        except Exception as e:
+                            if "bad escape" not in str(e):
+                                raise
 
                         try:
                             async with conn.transaction():
@@ -782,20 +791,21 @@ class Database(AbstractDatabase):
 
                         except asyncpg.UniqueViolationError:
                             # ----------------------------------------
-                            # 3) Race condition: another TX inserted first,
-                            #    retry the UPDATE
+                            # 3) RETRY UPDATE
                             # ----------------------------------------
                             if not (active_update_keys and set_columns):
                                 raise
 
                             set_parts, where_parts, args = [], [], []
                             idx = 1
+
                             for col in set_columns:
                                 set_parts.append(
                                     f"{self.sanitize_identifier(col)} = ${idx}"
                                 )
                                 args.append(values[col])
                                 idx += 1
+
                             for col in active_update_keys:
                                 where_parts.append(
                                     f"{self.sanitize_identifier(col)} = ${idx}"
@@ -809,27 +819,32 @@ class Database(AbstractDatabase):
                                 WHERE {" AND ".join(where_parts)}
                                 RETURNING *
                             """
-                            retry_sql, args = self.prepare(retry_sql, args)
+                            retry_sql = " ".join(retry_sql.split())
+                            args = list(args)
+
+                            try:
+                                retry_sql, args = self.prepare(retry_sql, args)
+                            except Exception as e:
+                                if "bad escape" not in str(e):
+                                    raise
+
                             row = await conn.fetchrow(retry_sql, *args)
 
+                    # ------------------------------------------------
+                    # FINAL
+                    # ------------------------------------------------
                     if row is None:
-                        raise RuntimeError(
-                            f"Upsert failed on table '{table}': row could not be inserted or updated. "
-                            "It may have been deleted mid-transaction."
-                        )
+                        raise RuntimeError(f"Upsert failed on table '{table}'")
 
-                    # Success: all row fields + error=None
                     data = dict(row)
                     data["error"] = None
                     UpsertResponse = namedtuple("UpsertResponse", data.keys())
                     return UpsertResponse(**data)
 
         except Exception as exc:
-            # Shared transaction: propagate so parent can rollback
             if conn is not None:
                 raise
 
-            # Standalone call: soft error with identifier_keys set to None
             error_fields = {k: None for k in identifier_keys}
             error_fields["error"] = str(exc)
             UpsertResponse = namedtuple("UpsertResponse", error_fields.keys())
