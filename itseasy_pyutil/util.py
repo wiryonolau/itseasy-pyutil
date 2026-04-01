@@ -527,3 +527,14 @@ def normalize_uuid(value) -> uuid.UUID:
         return uuid.UUID(bytes=value)
     else:
         raise ValueError(f"Invalid UUID value: {value}")
+
+
+def serialize_object(v):
+    if isinstance(v, str):
+        return v
+    if v is None:
+        return ""
+    try:
+        return json.dumps(v, default=str)
+    except Exception:
+        return ""
