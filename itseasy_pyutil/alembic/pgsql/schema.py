@@ -21,6 +21,14 @@ from itseasy_pyutil.util import boolval
 logger = logging.getLogger(__name__)
 
 
+def normalize_nulls(val):
+    return bool(val)  # None → False
+
+
+def normalize_columns(cols):
+    return tuple(sorted(cols))
+
+
 # ---------- Normalize default ----------
 def normalize_default_value(default_value, column_type=None):
     if default_value is None:
@@ -106,13 +114,11 @@ def column_info(connection, table_name, column_name):
     for col in inspector.get_columns(table_name):
         if col["name"] != column_name:
             continue
-        seq_query = text(
-            """
+        seq_query = text("""
             SELECT c.is_identity
             FROM information_schema.columns c
             WHERE c.table_name = :table AND c.column_name = :column
-            """
-        )
+            """)
         seq_res = connection.execute(
             seq_query, {"table": table_name, "column": column_name}
         ).fetchone()
@@ -214,8 +220,7 @@ def column_has_update(existing, new):
 
 # ---------- Remove column FK ----------
 def remove_column_fk(connection, table_name, column_name):
-    query = text(
-        """
+    query = text("""
         SELECT tc.constraint_name, tc.table_name
         FROM information_schema.table_constraints AS tc
         JOIN information_schema.key_column_usage AS kcu
@@ -224,8 +229,7 @@ def remove_column_fk(connection, table_name, column_name):
         WHERE tc.constraint_type = 'FOREIGN KEY'
           AND kcu.column_name = :column
           AND kcu.table_name = :table
-        """
-    )
+        """)
     fks = connection.execute(
         query, {"table": table_name, "column": column_name}
     ).fetchall()
@@ -267,14 +271,12 @@ def sync_sequence(connection, table_name, column):
 
     # 4️⃣ Inspect DB state
     row = connection.execute(
-        text(
-            """
+        text("""
             SELECT is_identity
             FROM information_schema.columns
             WHERE table_name = :table
               AND column_name = :column
-            """
-        ),
+            """),
         {"table": table_name, "column": column_name},
     ).fetchone()
 
@@ -644,8 +646,7 @@ def sync_indexes(connection, metadata):
         }
 
         # 2️⃣ Read existing DB index predicates (Postgres only)
-        predicate_sql = text(
-            """
+        predicate_sql = text("""
             SELECT
                 i.relname AS index_name,
                 pg_get_expr(ix.indpred, ix.indrelid) AS predicate
@@ -654,8 +655,7 @@ def sync_indexes(connection, metadata):
             JOIN pg_class t ON t.oid = ix.indrelid
             WHERE t.relname = :table
               AND ix.indpred IS NOT NULL
-        """
-        )
+        """)
 
         db_predicates = {
             row.index_name: row.predicate
@@ -714,8 +714,7 @@ def get_existing_fks(connection, table_name, schema="public"):
     Return dict mapping constrained columns tuple -> FK constraint name.
     Works reliably for lower-case table/column names in PostgreSQL.
     """
-    sql = text(
-        """
+    sql = text("""
         SELECT
             con.conname AS constraint_name,
             array_agg(att.attname ORDER BY att.attnum) AS constrained_columns
@@ -731,8 +730,7 @@ def get_existing_fks(connection, table_name, schema="public"):
             AND nsp.nspname = :schema
             AND rel.relname = :table
         GROUP BY con.conname
-        """
-    )
+        """)
     result = (
         connection.execute(sql, {"schema": schema, "table": table_name})
         .mappings()
@@ -807,8 +805,7 @@ def sync_unique_constraints(connection, metadata):
                 "nulls_not_distinct": "NULLS NOT DISTINCT" in row["definition"],
             }
             for row in connection.execute(
-                text(
-                    """
+                text("""
                     SELECT
                         c.conname,
                         pg_get_constraintdef(c.oid) AS definition,
@@ -822,8 +819,7 @@ def sync_unique_constraints(connection, metadata):
                     WHERE c.contype = 'u'
                       AND c.conrelid = to_regclass(:table)
                     GROUP BY c.conname, c.oid
-                """
-                ),
+                """),
                 {"table": table_name},
             ).mappings()
         }
@@ -866,8 +862,16 @@ def sync_unique_constraints(connection, metadata):
             if not model:
                 continue
 
+            model["nulls_not_distinct"] = normalize_nulls(
+                model.get("nulls_not_distinct", False)
+            )
+            db["nulls_not_distinct"] = normalize_nulls(
+                db.get("nulls_not_distinct", False)
+            )
+
             if (
-                model["columns"] == db["columns"]
+                normalize_columns(model["columns"])
+                == normalize_columns(db["columns"])
                 and model["nulls_not_distinct"] == db["nulls_not_distinct"]
             ):
                 continue
