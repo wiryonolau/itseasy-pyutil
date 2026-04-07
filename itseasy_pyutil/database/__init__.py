@@ -68,16 +68,15 @@ class Filter(NamedTuple):
 
 
 class Expression:
-    def __init__(self, expr: str, params=None):
+    def __init__(self, expr: str, params=None, glue="AND"):
         # Kill multiple statements
         expr = expr.split(";", 1)[0]
         # Kill inline comments
         expr = expr.split("--", 1)[0].split("/*", 1)[0]
 
         self._expr = expr.strip()
-
-        # ✅ PUT IT HERE
         self._params = list(params) if params else []
+        self._glue = glue.upper()
 
     @property
     def expr(self):
@@ -86,6 +85,10 @@ class Expression:
     @property
     def params(self):
         return self._params
+
+    @property
+    def glue(self):
+        return self._glue
 
     def __str__(self):
         return self._expr
@@ -424,7 +427,7 @@ class AbstractDatabase(abc.ABC):
 
             # ✅ 1. Expression FIRST
             if isinstance(condition, Expression):
-                glue = "AND" if len(statements) else ""
+                glue = condition.glue if len(statements) else ""
                 stmt = condition.expr
                 statements.append(f"{glue} {stmt}" if glue else stmt)
                 params += getattr(condition, "params", [])
