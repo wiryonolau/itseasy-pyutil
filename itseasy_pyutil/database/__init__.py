@@ -68,16 +68,24 @@ class Filter(NamedTuple):
 
 
 class Expression:
-    def __init__(self, expr: str):
+    def __init__(self, expr: str, params=None):
         # Kill multiple statements
         expr = expr.split(";", 1)[0]
         # Kill inline comments
         expr = expr.split("--", 1)[0].split("/*", 1)[0]
+
         self._expr = expr.strip()
+
+        # ✅ PUT IT HERE
+        self._params = list(params) if params else []
 
     @property
     def expr(self):
         return self._expr
+
+    @property
+    def params(self):
+        return self._params
 
     def __str__(self):
         return self._expr
@@ -410,25 +418,35 @@ class AbstractDatabase(abc.ABC):
         conditions = conditions or []
         params = []
         statements = []
+
         for i, condition in enumerate(conditions):
             stmt = ""
 
-            if isinstance(condition, ConditionSet):
+            # ✅ 1. Expression FIRST
+            if isinstance(condition, Expression):
+                glue = "AND" if len(statements) else ""
+                stmt = condition.expr
+                statements.append(f"{glue} {stmt}" if glue else stmt)
+                params += getattr(condition, "params", [])
+                continue
+
+            # ✅ 2. ConditionSet
+            elif isinstance(condition, ConditionSet):
                 group_stmt, group_params = self.parse_conditions(
                     conditions=condition.conditions, suffix=""
                 )
                 if not group_stmt:
                     continue
 
-                glue = (
-                    condition.glue if len(statements) else ""
-                )  # Only prepend if not first
+                glue = condition.glue if len(statements) else ""
 
                 statements.append(
                     f"{glue} ({group_stmt})" if glue else f"({group_stmt})"
                 )
                 params += group_params
                 continue
+
+            # ✅ 3. Tuple → Condition
             elif not isinstance(condition, Condition):
                 if len(condition) == 2:
                     column, value = condition
@@ -450,36 +468,43 @@ class AbstractDatabase(abc.ABC):
                 elif isinstance(value, bytes):
                     value = pymysql.Binary(value)
 
-                if not isinstance(column, Expression):
-                    column = self.sanitize_identifier(identifier=column)
+                column = self.sanitize_identifier(identifier=column)
 
                 condition = Condition(
                     column=column, value=value, opr=opr, glue=glue
                 )
+
+            # ===== EXISTING LOGIC (unchanged except 1 fix) =====
 
             if (
                 condition.opr in ["is", "is not", "IS", "IS NOT"]
                 and condition.value is None
             ):
                 stmt = f"{condition.column} {condition.opr} NULL"
+
             elif condition.opr in ["not in", "in", "NOT IN", "IN"]:
                 placeholders = ", ".join(["%s"] * len(condition.value))
                 stmt = f"{condition.column} {condition.opr} ({placeholders})"
                 params += condition.value
+
             elif condition.opr in ["between", "BETWEEN"]:
                 stmt = f"({condition.column} {condition.opr} %s AND %s)"
                 params += condition.value
+
             elif condition.opr == "ref":
                 """
                 FOR JOIN
                 """
                 if isinstance(condition.value, Expression):
                     stmt = f"{condition.column} = {condition.value.expr}"
+                    params += getattr(condition.value, "params", [])
                 else:
                     stmt = f"{condition.column} = {condition.value}"
+
             else:
                 if isinstance(condition.value, Expression):
                     stmt = f"{condition.column} {condition.opr} {condition.value.expr}"
+                    params += getattr(condition.value, "params", [])
                 else:
                     stmt = f"{condition.column} {condition.opr} %s"
                     params.append(condition.value)
