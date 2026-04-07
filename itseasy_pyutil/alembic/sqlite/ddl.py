@@ -8,7 +8,9 @@ logger = logging.getLogger(__name__)
 
 
 class DDLManager:
-    def __init__(self, conn, modules=[], app_package=None, dry_run=False):
+    def __init__(self, conn, modules=None, app_package=None, dry_run=False):
+        modules = modules or []
+
         self.conn = conn
         self.dry_run = dry_run
 
@@ -72,24 +74,20 @@ class DDLManager:
     # ----------------------------------------------------------------
     def _table_exists(self, table):
         row = self.conn.execute(
-            sa.text(
-                """
+            sa.text("""
             SELECT 1 FROM sqlite_master
             WHERE type='table' AND name=:name
-        """
-            ),
+        """),
             {"name": table},
         ).fetchone()
         return bool(row)
 
     def _trigger_exists(self, name):
         row = self.conn.execute(
-            sa.text(
-                """
+            sa.text("""
             SELECT 1 FROM sqlite_master
             WHERE type='trigger' AND name=:name
-        """
-            ),
+        """),
             {"name": name},
         ).fetchone()
         return bool(row)

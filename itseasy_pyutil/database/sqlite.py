@@ -83,13 +83,18 @@ class Database(AbstractDatabase):
     async def get_filter_rows(
         self,
         table,
-        columns=[],
-        joins=[],
-        conditions=[],
-        orders=[],
+        columns=None,
+        joins=None,
+        conditions=None,
+        orders=None,
         offset=0,
         limit=1000,
     ):
+        columns = columns or []
+        joins = joins or []
+        conditions = conditions or []
+        orders = orders or []
+
         join_stmt, join_params = self.parse_joins(joins)
         cond_stmt, cond_params = self.parse_conditions(conditions)
 
@@ -110,7 +115,10 @@ class Database(AbstractDatabase):
 
         return await self.get_rows(query, params)
 
-    async def get_count(self, table, joins=[], conditions=[]):
+    async def get_count(self, table, joins=None, conditions=None):
+        joins = joins or []
+        conditions = conditions or []
+
         join_stmt, join_params = self.parse_joins(joins)
         cond_stmt, cond_params = self.parse_conditions(conditions)
 
@@ -127,7 +135,9 @@ class Database(AbstractDatabase):
     # ------------------------------------------------------------------
     # execute
     # ------------------------------------------------------------------
-    async def execute(self, query, params=(), return_result=False):
+    async def execute(self, query, params=None, return_result=False):
+        params = params or []
+
         if self._as_dev:
             self._logger.debug(self.get_sql_string(query, params))
 
@@ -193,8 +203,12 @@ class Database(AbstractDatabase):
         return await self.execute(sql, values)
 
     async def update(
-        self, table, identifiers=[], column_values={}, conditions=[]
+        self, table, identifiers=None, column_values=None, conditions=None
     ):
+        identifiers = identifiers or []
+        conditions = conditions or []
+        column_values = column_values or {}
+
         set_cols = {
             k: v for k, v in column_values.items() if k not in identifiers
         }
@@ -220,8 +234,11 @@ class Database(AbstractDatabase):
         return await self.execute(sql, params)
 
     async def upsert(
-        self, table, identifiers=[], column_values={}, has_auto_id=True
+        self, table, identifiers=None, column_values=None, has_auto_id=True
     ):
+        identifiers = identifiers or []
+        column_values = column_values or {}
+
         UpsertResponse = namedtuple("UpsertResponse", identifiers + ["error"])
 
         cols = list(column_values.keys())

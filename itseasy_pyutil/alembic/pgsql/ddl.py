@@ -10,7 +10,9 @@ logger = logging.getLogger(__name__)
 
 
 class DDLManager:
-    def __init__(self, conn, modules=[], app_package=None, dry_run=False):
+    def __init__(self, conn, modules=None, app_package=None, dry_run=False):
+        modules = modules or []
+
         self.conn = conn
         self.app_modules_pkg = None
         self.dry_run = dry_run
@@ -84,24 +86,20 @@ class DDLManager:
     # ----------------------------------------------------------------
     def rename_table(self, old, new):
         exists_new = self.conn.execute(
-            sa.text(
-                """
+            sa.text("""
                 SELECT 1 FROM information_schema.tables
                 WHERE table_schema='public' AND table_name=:name
-            """
-            ),
+            """),
             {"name": new},
         ).fetchone()
         if exists_new:
             return
 
         exists_old = self.conn.execute(
-            sa.text(
-                """
+            sa.text("""
                 SELECT 1 FROM information_schema.tables
                 WHERE table_schema='public' AND table_name=:name
-            """
-            ),
+            """),
             {"name": old},
         ).fetchone()
         if not exists_old:
@@ -111,28 +109,24 @@ class DDLManager:
 
     def rename_column(self, table, old, new):
         exists_new = self.conn.execute(
-            sa.text(
-                """
+            sa.text("""
                 SELECT 1 FROM information_schema.columns
                 WHERE table_schema='public'
                 AND table_name=:table
                 AND column_name=:col
-            """
-            ),
+            """),
             {"table": table, "col": new},
         ).fetchone()
         if exists_new:
             return
 
         old_col = self.conn.execute(
-            sa.text(
-                """
+            sa.text("""
                 SELECT 1 FROM information_schema.columns
                 WHERE table_schema='public'
                 AND table_name=:table
                 AND column_name=:col
-            """
-            ),
+            """),
             {"table": table, "col": old},
         ).fetchone()
         if not old_col:
@@ -174,8 +168,7 @@ class DDLManager:
 
             # Check if partition already exists
             exists = self.conn.execute(
-                sa.text(
-                    """
+                sa.text("""
                     SELECT 1
                     FROM pg_inherits
                     JOIN pg_class parent ON pg_inherits.inhparent = parent.oid
@@ -184,8 +177,7 @@ class DDLManager:
                     WHERE parent.relname = :table
                     AND child.relname = :pname
                     AND nsp.nspname = :schema
-                    """
-                ),
+                    """),
                 {"table": table, "pname": pname, "schema": schema},
             ).fetchone()
 
@@ -208,8 +200,7 @@ class DDLManager:
                 )
 
                 exists = self.conn.execute(
-                    sa.text(
-                        """
+                    sa.text("""
                         SELECT 1
                         FROM pg_inherits
                         JOIN pg_class parent ON pg_inherits.inhparent = parent.oid
@@ -218,8 +209,7 @@ class DDLManager:
                         WHERE parent.relname = :table
                         AND child.relname = :pname
                         AND nsp.nspname = :schema
-                        """
-                    ),
+                        """),
                     {"table": table, "pname": pname, "schema": schema},
                 ).fetchone()
 
@@ -243,15 +233,13 @@ class DDLManager:
             exclude_columns = []
 
         rows = self.conn.execute(
-            sa.text(
-                """
+            sa.text("""
                 SELECT column_name
                 FROM information_schema.columns
                 WHERE table_schema = 'public'
                 AND table_name = :table
                 ORDER BY ordinal_position
-            """
-            ),
+            """),
             {"table": table_name},
         ).fetchall()
 
@@ -268,8 +256,7 @@ class DDLManager:
 
         trg = f"{table_name}_AINS"
 
-        self.ddl_execute(
-            f"""
+        self.ddl_execute(f"""
             CREATE OR REPLACE FUNCTION "{trg}_fn"()
             RETURNS trigger AS $$
             BEGIN
@@ -286,11 +273,9 @@ class DDLManager:
                 RETURN NEW;
             END;
             $$ LANGUAGE plpgsql
-        """
-        )
+        """)
 
-        self.ddl_execute(
-            f"""
+        self.ddl_execute(f"""
             DO $$
             BEGIN
                 IF NOT EXISTS (
@@ -301,15 +286,13 @@ class DDLManager:
                     FOR EACH ROW EXECUTE FUNCTION "{trg}_fn"();
                 END IF;
             END$$;
-        """
-        )
+        """)
 
         # ---------------- UPDATE ----------------
 
         trg = f"{table_name}_AUPD"
 
-        self.ddl_execute(
-            f"""
+        self.ddl_execute(f"""
             CREATE OR REPLACE FUNCTION "{trg}_fn"()
             RETURNS trigger AS $$
             BEGIN
@@ -329,11 +312,9 @@ class DDLManager:
                 RETURN NEW;
             END;
             $$ LANGUAGE plpgsql
-        """
-        )
+        """)
 
-        self.ddl_execute(
-            f"""
+        self.ddl_execute(f"""
             DO $$
             BEGIN
                 IF NOT EXISTS (
@@ -344,15 +325,13 @@ class DDLManager:
                     FOR EACH ROW EXECUTE FUNCTION "{trg}_fn"();
                 END IF;
             END$$;
-        """
-        )
+        """)
 
         # ---------------- DELETE ----------------
 
         trg = f"{table_name}_ADEL"
 
-        self.ddl_execute(
-            f"""
+        self.ddl_execute(f"""
             CREATE OR REPLACE FUNCTION "{trg}_fn"()
             RETURNS trigger AS $$
             BEGIN
@@ -369,11 +348,9 @@ class DDLManager:
                 RETURN OLD;
             END;
             $$ LANGUAGE plpgsql
-        """
-        )
+        """)
 
-        self.ddl_execute(
-            f"""
+        self.ddl_execute(f"""
             DO $$
             BEGIN
                 IF NOT EXISTS (
@@ -384,8 +361,7 @@ class DDLManager:
                     FOR EACH ROW EXECUTE FUNCTION "{trg}_fn"();
                 END IF;
             END$$;
-        """
-        )
+        """)
 
     def create_trigger(
         self,
@@ -405,8 +381,7 @@ class DDLManager:
             )
 
         # 1. Always replace function
-        self.ddl_execute(
-            f"""
+        self.ddl_execute(f"""
             CREATE OR REPLACE FUNCTION "{fn}"()
             RETURNS trigger AS $$
             {declare_sql}
@@ -414,13 +389,11 @@ class DDLManager:
                 {body.strip()}
             END;
             $$ LANGUAGE plpgsql
-        """
-        )
+        """)
 
         # 2. Check trigger existence
         exists = self.conn.execute(
-            sa.text(
-                """
+            sa.text("""
                 SELECT 1
                 FROM pg_trigger t
                 JOIN pg_class c ON t.tgrelid = c.oid
@@ -428,8 +401,7 @@ class DDLManager:
                 WHERE t.tgname = :trg
                 AND c.relname = :table
                 AND n.nspname = 'public'
-            """
-            ),
+            """),
             {"trg": name, "table": table},
         ).fetchone()
 
@@ -437,21 +409,18 @@ class DDLManager:
             return
 
         # 3. Create trigger only if missing
-        self.ddl_execute(
-            f"""
+        self.ddl_execute(f"""
             CREATE TRIGGER "{name}"
             {timing} {event} ON "{table}"
             FOR EACH ROW EXECUTE FUNCTION "{fn}"()
-        """
-        )
+        """)
 
     def create_modified_trigger(self, table):
         name = f"{table}_BUPD"
         fn = f"{name}_fn"
 
         # 1. Always replace function
-        self.ddl_execute(
-            f"""
+        self.ddl_execute(f"""
             CREATE OR REPLACE FUNCTION "{fn}"()
             RETURNS trigger AS $$
             BEGIN
@@ -459,13 +428,11 @@ class DDLManager:
                 RETURN NEW;
             END;
             $$ LANGUAGE plpgsql
-        """
-        )
+        """)
 
         # 2. Check trigger existence
         exists = self.conn.execute(
-            sa.text(
-                """
+            sa.text("""
                 SELECT 1
                 FROM pg_trigger t
                 JOIN pg_class c ON t.tgrelid = c.oid
@@ -473,8 +440,7 @@ class DDLManager:
                 WHERE t.tgname = :trg
                 AND c.relname = :table
                 AND n.nspname = 'public'
-            """
-            ),
+            """),
             {"trg": name, "table": table},
         ).fetchone()
 
@@ -482,13 +448,11 @@ class DDLManager:
             return
 
         # 3. Create trigger only if missing
-        self.ddl_execute(
-            f"""
+        self.ddl_execute(f"""
             CREATE TRIGGER "{name}"
             BEFORE UPDATE ON "{table}"
             FOR EACH ROW EXECUTE FUNCTION "{fn}"()
-        """
-        )
+        """)
 
     def create_procedure(self, name, body, drop=False):
         if drop:

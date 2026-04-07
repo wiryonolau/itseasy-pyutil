@@ -10,7 +10,9 @@ logger = logging.getLogger(__name__)
 
 
 class DDLManager:
-    def __init__(self, conn, modules=[], app_package=None, dry_run=False):
+    def __init__(self, conn, modules=None, app_package=None, dry_run=False):
+        modules = modules or []
+
         self.conn = conn
         self.app_modules_pkg = None
         self.dry_run = dry_run
@@ -80,13 +82,11 @@ class DDLManager:
 
     def rename_table(self, old, new):
         exists_new = self.conn.execute(
-            sa.text(
-                """
+            sa.text("""
                 SELECT 1 FROM information_schema.TABLES
                 WHERE TABLE_SCHEMA = DATABASE()
                 AND TABLE_NAME = :name
-            """
-            ),
+            """),
             {"name": new},
         ).fetchone()
 
@@ -94,13 +94,11 @@ class DDLManager:
             return
 
         exists_old = self.conn.execute(
-            sa.text(
-                """
+            sa.text("""
                 SELECT 1 FROM information_schema.TABLES
                 WHERE TABLE_SCHEMA = DATABASE()
                 AND TABLE_NAME = :name
-            """
-            ),
+            """),
             {"name": old},
         ).fetchone()
 
@@ -111,14 +109,12 @@ class DDLManager:
 
     def rename_column(self, table, old, new):
         exists_new = self.conn.execute(
-            sa.text(
-                """
+            sa.text("""
                 SELECT 1 FROM information_schema.COLUMNS
                 WHERE TABLE_SCHEMA = DATABASE()
                 AND TABLE_NAME = :table
                 AND COLUMN_NAME = :col
-            """
-            ),
+            """),
             {"table": table, "col": new},
         ).fetchone()
 
@@ -126,15 +122,13 @@ class DDLManager:
             return
 
         old_col = self.conn.execute(
-            sa.text(
-                """
+            sa.text("""
                 SELECT COLUMN_TYPE, IS_NULLABLE, COLUMN_DEFAULT
                 FROM information_schema.COLUMNS
                 WHERE TABLE_SCHEMA = DATABASE()
                 AND TABLE_NAME = :table
                 AND COLUMN_NAME = :col
-            """
-            ),
+            """),
             {"table": table, "col": old},
         ).fetchone()
 
@@ -169,14 +163,12 @@ class DDLManager:
 
         # --- 0. Detect if table is already partitioned ---
         rows = conn.execute(
-            text(
-                """
+            text("""
             SELECT PARTITION_NAME
             FROM information_schema.PARTITIONS
             WHERE TABLE_SCHEMA = DATABASE()
             AND TABLE_NAME = :table
-        """
-            ),
+        """),
             {"table": table},
         ).fetchall()
 
@@ -320,15 +312,13 @@ class DDLManager:
 
         # 1. Load columns for diff
         rows = self.conn.execute(
-            sa.text(
-                """
+            sa.text("""
             SELECT COLUMN_NAME
             FROM information_schema.COLUMNS
             WHERE TABLE_SCHEMA = DATABASE()
             AND TABLE_NAME = :table
             ORDER BY ORDINAL_POSITION
-        """
-            ),
+        """),
             {"table": table_name},
         ).fetchall()
 
@@ -424,13 +414,11 @@ class DDLManager:
     def create_trigger(self, name, sql, drop=False):
         logger.debug(f"Create trigger for {name}")
         exists = self.conn.execute(
-            sa.text(
-                """
+            sa.text("""
                 SELECT 1 FROM information_schema.TRIGGERS
                 WHERE TRIGGER_SCHEMA = DATABASE()
                 AND TRIGGER_NAME = :name
-            """
-            ),
+            """),
             {"name": name},
         ).fetchone()
 
@@ -447,13 +435,11 @@ class DDLManager:
         logger.debug(f"Create modified trigger {name} for {table}")
 
         exists = self.conn.execute(
-            sa.text(
-                """
+            sa.text("""
                 SELECT 1 FROM information_schema.TRIGGERS
                 WHERE TRIGGER_SCHEMA = DATABASE()
                 AND TRIGGER_NAME = :name
-            """
-            ),
+            """),
             {"name": name},
         ).fetchone()
 
@@ -476,14 +462,12 @@ class DDLManager:
 
     def create_procedure(self, name, body, drop=False):
         exists = self.conn.execute(
-            sa.text(
-                """
+            sa.text("""
                 SELECT 1 FROM information_schema.ROUTINES
                 WHERE ROUTINE_SCHEMA = DATABASE()
                 AND ROUTINE_NAME = :name
                 AND ROUTINE_TYPE = 'PROCEDURE'
-            """
-            ),
+            """),
             {"name": name},
         ).fetchone()
 

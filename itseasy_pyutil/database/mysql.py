@@ -125,8 +125,13 @@ class Database(AbstractDatabase):
                 return await cursor.fetchone()
 
     async def get_filter_row(
-        self, table, columns=[], joins=[], conditions=[], orders=[]
+        self, table, columns=None, joins=None, conditions=None, orders=None
     ):
+        columns = columns or []
+        joins = joins or []
+        conditions = conditions or []
+        orders = orders or []
+
         response = await self.get_filter_rows(
             table=table,
             columns=columns,
@@ -141,13 +146,18 @@ class Database(AbstractDatabase):
     async def get_filter_rows(
         self,
         table,
-        columns=[],
-        joins=[],
-        conditions=[],
-        orders=[],
+        columns=None,
+        joins=None,
+        conditions=None,
+        orders=None,
         offset=0,
         limit=1000,
     ):
+        columns = columns or []
+        joins = joins or []
+        conditions = conditions or []
+        orders = orders or []
+
         join_stmt, join_params = self.parse_joins(joins)
         conditions_stmt, conditions_params = self.parse_conditions(conditions)
 
@@ -166,12 +176,16 @@ class Database(AbstractDatabase):
                 )
                 return await cursor.fetchall()
 
-    async def get_count(self, table, index=None, joins=[], conditions=[]):
+    async def get_count(self, table, index=None, joins=None, conditions=None):
+        index = index or "*"
+        joins = joins or []
+        conditions = conditions or []
+
         join_stmt, join_params = self.parse_joins(joins)
         conditions_stmt, conditions_params = self.parse_conditions(conditions)
 
         query = f"""
-            SELECT COUNT({index or "*"}) AS total
+            SELECT COUNT({index}) AS total
             FROM {self.sanitize_identifier(table)}
             {join_stmt}
             {conditions_stmt}
@@ -187,7 +201,9 @@ class Database(AbstractDatabase):
     # Write helpers (TX SAFE + backward compatible)
     # -----------------------------
 
-    async def execute(self, query, params=(), return_result=False):
+    async def execute(self, query, params=None, return_result=False):
+        params = params or ()
+
         async with self._pool.acquire() as conn:
             async with conn.cursor(aiomysql.DictCursor) as cursor:
                 try:
@@ -314,8 +330,12 @@ class Database(AbstractDatabase):
                     )
 
     async def update(
-        self, table, identifiers=[], column_values={}, conditions=[]
+        self, table, identifiers=None, column_values=None, conditions=None
     ):
+        identifiers = identifiers or []
+        conditions = conditions or []
+        column_values = column_values or {}
+
         id_conditions = [
             Condition(column=col, value=column_values.get(col))
             for col in identifiers
@@ -360,8 +380,11 @@ class Database(AbstractDatabase):
                     )
 
     async def upsert(
-        self, table, identifiers=[], column_values={}, has_auto_id=True
+        self, table, identifiers=None, column_values=None, has_auto_id=True
     ):
+        identifiers = identifiers or []
+        column_values = column_values or {}
+
         columns = list(column_values.keys())
         values = list(column_values.values())
 

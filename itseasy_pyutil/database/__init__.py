@@ -222,7 +222,7 @@ class AbstractDatabase(abc.ABC):
                 return filters.pop(i)
         return None
 
-    def filter_to_conditions(self, filters=[], mapping={}, column_types={}):
+    def filter_to_conditions(self, filters, mapping=None, column_types=None):
         """
         Convert frontend filters to Condition objects.
 
@@ -231,6 +231,9 @@ class AbstractDatabase(abc.ABC):
             mapping: dict mapping frontend field id → DB column
             column_types: dict mapping column_name → type (e.g., 'int', 'bool', 'timestamp', 'timestamptz', 'json')
         """
+        filters = filters or []
+        mapping = mapping or {}
+        column_types = column_types or {}
 
         conditions = []
 
@@ -403,7 +406,8 @@ class AbstractDatabase(abc.ABC):
 
         return (" ".join(stmts), params)
 
-    def parse_conditions(self, conditions=[], suffix="WHERE"):
+    def parse_conditions(self, conditions=None, suffix="WHERE"):
+        conditions = conditions or []
         params = []
         statements = []
         for i, condition in enumerate(conditions):
@@ -503,14 +507,19 @@ class AbstractDatabase(abc.ABC):
     def select_stmt(
         self,
         table,
-        columns=[],
-        joins=[],
-        conditions=[],
-        orders=[],
+        columns=None,
+        joins=None,
+        conditions=None,
+        orders=None,
         limit=100,
         offset=0,
         for_update=False,
     ):
+        columns = columns or []
+        joins = joins or []
+        conditions = conditions or []
+        orders = orders or []
+
         join_stmt, join_params = self.parse_joins(joins)
         conditions_stmt, conditions_params = self.parse_conditions(conditions)
 
@@ -568,11 +577,15 @@ class AbstractDatabase(abc.ABC):
     def update_stmt(
         self,
         table,
-        identifiers=[],
-        conditions=[],
-        column_values={},
+        identifiers=None,
+        conditions=None,
+        column_values=None,
         returning=None,
     ):
+        identifiers = identifiers or []
+        conditions = conditions or []
+        column_values = column_values or {}
+
         condition_by_identifier = []
 
         for col in identifiers:

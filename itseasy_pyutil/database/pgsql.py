@@ -211,21 +211,36 @@ class Database(AbstractDatabase):
         async with self._acquire_pool() as c:
             yield c
 
-    async def get_rows(self, query, params=(), conn=None):
+    async def get_rows(self, query, params=None, conn=None):
+        params = params or []
+
         sql, params = self.prepare(query, params)
         async with self._get_connection(conn=conn) as conn:
             rows = await conn.fetch(sql, *params)
             return [dict(r) for r in rows]
 
-    async def get_row(self, query, params=(), conn=None):
+    async def get_row(self, query, params=None, conn=None):
+        params = params or []
+
         sql, params = self.prepare(query, params)
         async with self._get_connection(conn=conn) as conn:
             row = await conn.fetchrow(sql, *params)
             return dict(row) if row else None
 
     async def get_filter_row(
-        self, table, columns=[], joins=[], conditions=[], orders=[], conn=None
+        self,
+        table,
+        columns=None,
+        joins=None,
+        conditions=None,
+        orders=None,
+        conn=None,
     ):
+        columns = columns or []
+        joins = joins or []
+        conditions = conditions or []
+        orders = orders or []
+
         response = await self.get_filter_rows(
             table=table,
             columns=columns,
@@ -242,14 +257,19 @@ class Database(AbstractDatabase):
     async def get_filter_rows(
         self,
         table,
-        columns=[],
-        joins=[],
-        conditions=[],
-        orders=[],
+        columns=None,
+        joins=None,
+        conditions=None,
+        orders=None,
         offset=0,
         limit=1000,
         conn=None,
     ):
+        columns = columns or []
+        joins = joins or []
+        conditions = conditions or []
+        orders = orders or []
+
         offset = 0 if offset is None else max(0, int(offset))
         limit = 1000 if limit is None else max(1, int(limit))
 
@@ -280,13 +300,17 @@ class Database(AbstractDatabase):
             return [dict(r) for r in rows]
 
     async def get_count(
-        self, table, index=None, joins=[], conditions=[], conn=None
+        self, table, index=None, joins=None, conditions=None, conn=None
     ):
+        index = index or "*"
+        joins = joins or []
+        conditions = conditions or []
+
         join_stmt, join_params = self.parse_joins(joins)
         conditions_stmt, conditions_params = self.parse_conditions(conditions)
 
         query = f"""
-            SELECT COUNT({index or "*"}) AS total
+            SELECT COUNT({index}) AS total
             FROM {self.sanitize_identifier(table)}
             {join_stmt}
             {conditions_stmt}
@@ -307,8 +331,10 @@ class Database(AbstractDatabase):
         return total
 
     async def execute(
-        self, query, params=(), return_result: bool = False, conn=None
+        self, query, params=None, return_result: bool = False, conn=None
     ):
+        params = params or []
+
         try:
             async with self._get_connection(conn) as conn:
                 query, params = self.prepare(query, params)
@@ -331,10 +357,12 @@ class Database(AbstractDatabase):
                 success=False, lastrowid=None, data={}, error=str(e)
             )
 
-    async def execute_many(self, statements=[], conn=None):
+    async def execute_many(self, statements=None, conn=None):
         """
         statements: list of (query,) or (query, params)
         """
+        statements = statements or []
+
         affected_rows = 0
         try:
             async with self._get_connection(conn) as conn:
@@ -370,7 +398,9 @@ class Database(AbstractDatabase):
                 success=False, lastrowid=None, data={}, error=str(e)
             )
 
-    async def delete(self, table, conditions=[], conn=None):
+    async def delete(self, table, conditions=None, conn=None):
+        conditions = conditions or []
+
         conditions_stmt, params = self.parse_conditions(conditions)
 
         query = f"""
