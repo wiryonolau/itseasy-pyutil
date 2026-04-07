@@ -36,6 +36,26 @@ class DryRunConnection:
         self._dialect = conn.dialect
         self._formatter = SQLFormatter()
 
+    def __getattr__(self, name):
+        if name in {"execute", "exec_driver_sql"}:
+            return getattr(self, name)
+        raise AttributeError(f"{name} is not allowed in DryRunConnection")
+
+    @property
+    def connection(self):
+        raise RuntimeError("DBAPI access is disabled in dry-run mode")
+
+    @property
+    def engine(self):
+        raise RuntimeError("Engine execution disabled in dry-run mode")
+
+    def scalar(self, *args, **kwargs):
+        return None
+
+    # SqlAlchemy
+    def _execute_20(self, statement, *args, **kwargs):
+        return self.execute(statement, *args, **kwargs)
+
     def _clean_sql(self, sql: str) -> str:
         return self._formatter.format(sql)
 
@@ -51,6 +71,15 @@ class DryRunConnection:
             or sql.startswith("show")
             or sql.startswith("describe")
         )
+
+    def begin(self, *args, **kwargs):
+        return self
+
+    def commit(self):
+        pass
+
+    def rollback(self):
+        pass
 
     def execute(self, statement, *args, **kwargs):
         if isinstance(statement, Executable):
@@ -78,6 +107,3 @@ class DryRunConnection:
 
         self._print_sql(sql)
         return DryRunResult()
-
-    def __getattr__(self, name):
-        return getattr(self._conn, name)

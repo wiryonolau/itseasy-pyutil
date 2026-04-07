@@ -210,6 +210,18 @@ class AbstractDatabase(abc.ABC):
 
         return value
 
+    def pop_filters(filters, target_id):
+        """
+        Remove first filter where filter["id"] == target_id.
+        Mutates original list and returns the removed filter (or None).
+
+        We need this for special case pass from frontend to backend
+        """
+        for i, f in enumerate(filters):
+            if f.get("id") == target_id:
+                return filters.pop(i)
+        return None
+
     def filter_to_conditions(self, filters=[], mapping={}, column_types={}):
         """
         Convert frontend filters to Condition objects.
