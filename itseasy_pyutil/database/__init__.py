@@ -210,7 +210,7 @@ class AbstractDatabase(abc.ABC):
 
         return value
 
-    def pop_filters(filters, target_id):
+    def pop_filters(self, filters, target_id):
         """
         Remove first filter where filter["id"] == target_id.
         Mutates original list and returns the removed filter (or None).
