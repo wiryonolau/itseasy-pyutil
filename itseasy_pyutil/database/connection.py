@@ -1,8 +1,7 @@
 import logging
 
+from sqlalchemy import inspection
 from sqlalchemy.sql import Executable
-
-from itseasy_pyutil.database.formatter import SQLFormatter
 
 logger = logging.getLogger(__name__)
 
@@ -34,45 +33,21 @@ class DryRunConnection:
     def __init__(self, conn):
         self._conn = conn
         self._dialect = conn.dialect
-        self._formatter = SQLFormatter()
 
-    def __getattr__(self, name):
-        if name in {"execute", "exec_driver_sql"}:
-            return getattr(self, name)
-        raise AttributeError(f"{name} is not allowed in DryRunConnection")
+    def __enter__(self):
+        self._conn.__enter__()
+        return self
 
-    @property
-    def connection(self):
-        raise RuntimeError("DBAPI access is disabled in dry-run mode")
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        return self._conn.__exit__(exc_type, exc_val, exc_tb)
 
-    @property
-    def engine(self):
-        raise RuntimeError("Engine execution disabled in dry-run mode")
-
-    def scalar(self, *args, **kwargs):
-        return None
-
-    # SqlAlchemy
-    def _execute_20(self, statement, *args, **kwargs):
-        return self.execute(statement, *args, **kwargs)
-
-    def _clean_sql(self, sql: str) -> str:
-        return self._formatter.format(sql)
-
-    def _print_sql(self, sql):
-        cleaned = self._clean_sql(sql)
-
-        logger.info("\n--\n\n%s", cleaned)
-
-    def _is_read_query(self, sql: str) -> bool:
-        sql = sql.lstrip().lower()
-        return (
-            sql.startswith("select")
-            or sql.startswith("show")
-            or sql.startswith("describe")
-        )
+    # 🔑 CRITICAL: propagate wrapping
+    def execution_options(self, *args, **kwargs):
+        conn = self._conn.execution_options(*args, **kwargs)
+        return DryRunConnection(conn)
 
     def begin(self, *args, **kwargs):
+        self._conn.begin(*args, **kwargs)
         return self
 
     def commit(self):
@@ -80,6 +55,25 @@ class DryRunConnection:
 
     def rollback(self):
         pass
+
+    @property
+    def dialect(self):
+        return self._dialect
+
+    @property
+    def engine(self):
+        return self._conn.engine
+
+    @property
+    def connection(self):
+        return self._conn.connection
+
+    def _is_read(self, sql: str) -> bool:
+        sql = sql.strip().lower()
+        return sql.startswith(("select", "show", "describe", "with"))
+
+    def _print(self, sql: str):
+        logger.info("\n--\n\n%s", sql)
 
     def execute(self, statement, *args, **kwargs):
         if isinstance(statement, Executable):
@@ -91,19 +85,25 @@ class DryRunConnection:
         else:
             sql = str(statement)
 
-        # Skip read queries entirely
-        if self._is_read_query(sql):
-            return DryRunResult()
+        if self._is_read(sql):
+            return self._conn.execute(statement, *args, **kwargs)
 
-        self._print_sql(sql)
-
+        self._print(sql)
         return DryRunResult()
 
     def exec_driver_sql(self, statement, *args, **kwargs):
         sql = str(statement)
 
-        if self._is_read_query(sql):
-            return DryRunResult()
+        if self._is_read(sql):
+            return self._conn.exec_driver_sql(statement, *args, **kwargs)
 
-        self._print_sql(sql)
+        self._print(sql)
         return DryRunResult()
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+
+
+@inspection._inspects(DryRunConnection)
+def inspect_dry_run_connection(subject):
+    return inspection.inspect(subject._conn)
