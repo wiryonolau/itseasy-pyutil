@@ -143,8 +143,8 @@ class AbstractDatabase(abc.ABC):
         self._db_config = db_config
         self._dialects = dialects
         self._pool = None
-        self._max_limit = None
-        self._max_offset = None
+        self._max_limit = max_limit
+        self._max_offset = max_offset
         self._as_dev = as_dev
 
         self._logger = get_logger(self.__class__.__name__)
