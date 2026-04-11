@@ -5,6 +5,17 @@ class DryRunEngine:
     def __init__(self, engine):
         self._engine = engine
 
+    @staticmethod
+    def patch_dialect(dialect):
+        orig = dialect.has_table
+
+        def wrapped(connection, *args, **kwargs):
+            if isinstance(connection, DryRunConnection):
+                connection = connection._conn
+            return orig(connection, *args, **kwargs)
+
+        dialect.has_table = wrapped
+
     def connect(self, *args, **kwargs):
         conn = self._engine.connect(*args, **kwargs)
         return DryRunConnection(conn)

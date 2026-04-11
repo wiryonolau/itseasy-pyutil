@@ -68,6 +68,7 @@ class DDLManager:
                     "create_audit_trigger": self.create_audit_trigger,
                     "create_modified_trigger": self.create_modified_trigger,
                     "create_procedure": self.create_procedure,
+                    "create_view": self.create_view,
                     "run_ddl": self.run_ddl,
                 }
             )
@@ -459,6 +460,12 @@ class DDLManager:
             self.ddl_execute(f"DROP PROCEDURE IF EXISTS {name}")
 
         self.ddl_execute(f"CREATE PROCEDURE {name} {body}")
+
+    def create_view(self, name, body, drop=False):
+        if drop:
+            self.ddl_execute(f"DROP VIEW IF EXISTS {name} CASCADE")
+
+        self.ddl_execute(f"CREATE OR REPLACE VIEW {name} AS {body}")
 
     def run_ddl(self, sql):
         self.ddl_execute(sql)
