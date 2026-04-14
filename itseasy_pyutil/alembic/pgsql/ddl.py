@@ -461,11 +461,25 @@ class DDLManager:
 
         self.ddl_execute(f"CREATE PROCEDURE {name} {body}")
 
-    def create_view(self, name, body, drop=False):
-        if drop:
-            self.ddl_execute(f"DROP VIEW IF EXISTS {name} CASCADE")
+    def create_view(
+        self, name, body, drop=False, materialized=False, with_data=True
+    ):
+        if materialized:
+            if drop:
+                self.ddl_execute(
+                    f"DROP MATERIALIZED VIEW IF EXISTS {name} CASCADE"
+                )
 
-        self.ddl_execute(f"CREATE OR REPLACE VIEW {name} AS {body}")
+            # no OR REPLACE support → must CREATE
+            self.ddl_execute(
+                f"CREATE MATERIALIZED VIEW {name} AS {body} "
+                + ("" if with_data else "WITH NO DATA")
+            )
+        else:
+            if drop:
+                self.ddl_execute(f"DROP VIEW IF EXISTS {name} CASCADE")
+
+            self.ddl_execute(f"CREATE OR REPLACE VIEW {name} AS {body}")
 
     def run_ddl(self, sql):
         self.ddl_execute(sql)
