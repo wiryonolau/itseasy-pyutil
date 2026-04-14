@@ -472,7 +472,7 @@ class DDLManager:
 
             # no OR REPLACE support → must CREATE
             self.ddl_execute(
-                f"CREATE MATERIALIZED VIEW {name} AS {body} "
+                f"CREATE MATERIALIZED VIEW IF NOT EXISTS {name} AS {body} "
                 + ("" if with_data else "WITH NO DATA")
             )
         else:
