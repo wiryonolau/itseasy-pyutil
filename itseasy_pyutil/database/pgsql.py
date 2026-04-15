@@ -180,7 +180,7 @@ class Database(AbstractDatabase):
         finally:
             if not released:
                 try:
-                    await self._pool.release(conn, timeout=5)
+                    await self._pool.release(conn)
                 except Exception:
                     self._logger.error(
                         "Failed to release connection", exc_info=True
@@ -210,6 +210,13 @@ class Database(AbstractDatabase):
 
         async with self._acquire_pool() as c:
             yield c
+
+    async def refresh_view(self, view_name: str):
+        conn = await asyncpg.connect(dsn=self._dsn)
+        try:
+            await conn.execute(f"REFRESH MATERIALIZED VIEW {view_name}")
+        finally:
+            await conn.close()
 
     async def get_rows(self, query, params=None, conn=None):
         params = params or []
@@ -350,12 +357,10 @@ class Database(AbstractDatabase):
                             return await conn.fetch(query, *params)
 
                         await conn.execute(query, *params)
-                        await conn.execute("COMMIT")
                 else:
                     if return_result:
                         return await conn.fetch(query, *params)
                     await conn.execute(query, *params)
-                    await conn.execute("COMMIT")
 
                 return Response(
                     success=True, lastrowid=None, data={}, error=None
