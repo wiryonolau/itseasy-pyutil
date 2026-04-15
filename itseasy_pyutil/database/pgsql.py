@@ -212,7 +212,14 @@ class Database(AbstractDatabase):
             yield c
 
     async def refresh_view(self, view_name: str):
-        conn = await asyncpg.connect(**self._db_config)
+        conn = await asyncpg.connect(
+            host=self._db.config.get("host"),
+            port=self._db.config.get("port"),
+            user=self._db.config.get("user"),
+            password=self._db.config.get("password"),
+            database=self._db.config.get("database"),
+            server_settings={"timezone": "UTC"},
+        )
         try:
             await conn.execute(f"REFRESH MATERIALIZED VIEW {view_name}")
         finally:
