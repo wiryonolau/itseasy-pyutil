@@ -213,11 +213,11 @@ class Database(AbstractDatabase):
 
     async def refresh_view(self, view_name: str):
         conn = await asyncpg.connect(
-            host=self._db.config.get("host"),
-            port=self._db.config.get("port"),
-            user=self._db.config.get("user"),
-            password=self._db.config.get("password"),
-            database=self._db.config.get("database"),
+            host=self._db_config.get("host"),
+            port=self._db_config.get("port"),
+            user=self._db_config.get("user"),
+            password=self._db_config.get("password"),
+            database=self._db_config.get("database"),
             server_settings={"timezone": "UTC"},
         )
         try:
