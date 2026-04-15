@@ -180,7 +180,7 @@ class Database(AbstractDatabase):
         finally:
             if not released:
                 try:
-                    await self._pool.release(conn)
+                    await self._pool.release(conn, timeout=5)
                 except Exception:
                     self._logger.error(
                         "Failed to release connection", exc_info=True
@@ -335,8 +335,8 @@ class Database(AbstractDatabase):
         query,
         params=None,
         return_result: bool = False,
-        conn=None,
         use_tx: bool = True,
+        conn=None,
     ):
         params = params or []
 
@@ -350,10 +350,12 @@ class Database(AbstractDatabase):
                             return await conn.fetch(query, *params)
 
                         await conn.execute(query, *params)
+                        await conn.execute("COMMIT")
                 else:
                     if return_result:
                         return await conn.fetch(query, *params)
                     await conn.execute(query, *params)
+                    await conn.execute("COMMIT")
 
                 return Response(
                     success=True, lastrowid=None, data={}, error=None
@@ -367,7 +369,7 @@ class Database(AbstractDatabase):
                 success=False, lastrowid=None, data={}, error=str(e)
             )
 
-    async def execute_many(self, statements=None, conn=None):
+    async def execute_many(self, statements=None, conn=None, use_tx=True):
         """
         statements: list of (query,) or (query, params)
         """
@@ -376,8 +378,23 @@ class Database(AbstractDatabase):
         affected_rows = 0
         try:
             async with self._get_connection(conn) as conn:
-                async with conn.transaction():
+                if use_tx:
+                    async with conn.transaction():
 
+                        for stmt in statements:
+                            args = []
+                            if len(stmt) == 1:
+                                query = stmt[0]
+                            elif len(stmt) == 2:
+                                query, args = stmt
+                            else:
+                                continue
+
+                            query, args = self.prepare(query, args)
+                            result = await conn.execute(query, *args)
+
+                            affected_rows += int(result.split()[-1])
+                else:
                     for stmt in statements:
                         args = []
                         if len(stmt) == 1:
