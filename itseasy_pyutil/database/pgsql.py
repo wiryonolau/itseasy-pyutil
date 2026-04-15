@@ -212,7 +212,7 @@ class Database(AbstractDatabase):
             yield c
 
     async def refresh_view(self, view_name: str):
-        conn = await asyncpg.connect(dsn=self._dsn)
+        conn = await asyncpg.connect(**self._db_config)
         try:
             await conn.execute(f"REFRESH MATERIALIZED VIEW {view_name}")
         finally:
