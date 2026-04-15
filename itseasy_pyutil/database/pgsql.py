@@ -218,10 +218,12 @@ class Database(AbstractDatabase):
             user=self._db_config.get("user"),
             password=self._db_config.get("password"),
             database=self._db_config.get("database"),
-            server_settings={"timezone": "UTC"},
+            server_settings=self._db_config.get("server_settings", {}),
         )
         try:
-            await conn.execute(f"REFRESH MATERIALIZED VIEW {view_name}")
+            await conn.execute(
+                f"REFRESH MATERIALIZED VIEW CONCURRENTLY {view_name}"
+            )
         finally:
             await conn.close()
 
