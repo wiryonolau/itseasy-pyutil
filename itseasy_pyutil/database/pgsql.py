@@ -331,7 +331,12 @@ class Database(AbstractDatabase):
         return total
 
     async def execute(
-        self, query, params=None, return_result: bool = False, conn=None
+        self,
+        query,
+        params=None,
+        return_result: bool = False,
+        conn=None,
+        use_tx: bool = True,
     ):
         params = params or []
 
@@ -339,10 +344,15 @@ class Database(AbstractDatabase):
             async with self._get_connection(conn) as conn:
                 query, params = self.prepare(query, params)
 
-                if return_result:
-                    return await conn.fetch(query, *params)
+                if use_tx:
+                    async with conn.transaction():
+                        if return_result:
+                            return await conn.fetch(query, *params)
 
-                async with conn.transaction():
+                        await conn.execute(query, *params)
+                else:
+                    if return_result:
+                        return await conn.fetch(query, *params)
                     await conn.execute(query, *params)
 
                 return Response(
