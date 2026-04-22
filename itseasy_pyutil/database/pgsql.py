@@ -16,6 +16,28 @@ from itseasy_pyutil.database import (
 )
 
 
+def get_user_friendly_error(e: Exception) -> str:
+    if isinstance(e, asyncpg.ForeignKeyViolationError):
+        return "This item cannot be removed because it is still being used."
+
+    if isinstance(e, asyncpg.UniqueViolationError):
+        return "This value is already in use. Please choose a different one."
+
+    if isinstance(e, asyncpg.NotNullViolationError):
+        return "Please fill in all required fields."
+
+    if isinstance(e, asyncpg.CheckViolationError):
+        return "One of the values provided is invalid."
+
+    if isinstance(e, asyncpg.IntegrityConstraintViolationError):
+        return "Your action could not be completed due to a data constraint."
+
+    if isinstance(e, asyncpg.PostgresError):
+        return "A database error occurred. Please try again."
+
+    return str(e)
+
+
 class Database(AbstractDatabase):
     def prepare(self, sql, params):
         has_percent = "%s" in sql
@@ -719,7 +741,7 @@ class Database(AbstractDatabase):
                 raise
 
             UpsertResponse = namedtuple("UpsertResponse", ["error"])
-            return UpsertResponse(error=str(exc))
+            return UpsertResponse(error=get_user_friendly_error(exc))
 
     async def upsert2(
         self,
@@ -917,6 +939,6 @@ class Database(AbstractDatabase):
                 raise
 
             error_fields = {k: None for k in identifier_keys}
-            error_fields["error"] = str(exc)
+            error_fields["error"] = get_user_friendly_error(exc)
             UpsertResponse = namedtuple("UpsertResponse", error_fields.keys())
             return UpsertResponse(**error_fields)

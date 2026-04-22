@@ -1,4 +1,5 @@
 import logging
+import os
 import re
 
 from sqlalchemy import (
@@ -17,6 +18,8 @@ from sqlalchemy.sql.elements import TextClause
 from sqlalchemy.sql.schema import DefaultClause, ScalarElementColumnDefault
 
 from itseasy_pyutil.util import boolval
+
+DRY_RUN = boolval(os.getenv("DRY_RUN", False))
 
 logger = logging.getLogger(__name__)
 
